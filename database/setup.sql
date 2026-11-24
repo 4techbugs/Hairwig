@@ -91,6 +91,7 @@ BEGIN
         CONSTRAINT PK_Users PRIMARY KEY (UserId),
         CONSTRAINT UQ_Users_Username UNIQUE (Username),
         CONSTRAINT UQ_Users_Email UNIQUE (Email),
+        CONSTRAINT UQ_Users_Mobile UNIQUE (Mobile),
         CONSTRAINT FK_Users_Roles FOREIGN KEY (RoleId) REFERENCES dbo.Roles(RoleId),
         CONSTRAINT FK_Users_Branches FOREIGN KEY (BranchId) REFERENCES dbo.Branches(BranchId)
     );

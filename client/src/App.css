@@ -1058,6 +1058,30 @@ tbody tr:last-child td {
   margin-bottom: 20px;
 }
 
+.bill-number-preview {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.bill-number-preview span {
+  color: var(--muted);
+}
+
+.bill-number-preview strong {
+  color: var(--primary-strong);
+}
+
+.bill-number-preview small {
+  color: var(--muted);
+}
+
 .sale-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;
@@ -1090,9 +1114,12 @@ tbody tr:last-child td {
   color: #15803d;
 }
 
-.client-lookup-status.not-found,
 .client-lookup-status.error {
   color: #b91c1c;
+}
+
+.client-lookup-status.not-found {
+  color: #64748b;
 }
 
 .sale-checkbox {
@@ -1129,27 +1156,65 @@ tbody tr:last-child td {
 }
 
 .sale-table-scroll {
-  overflow-x: auto;
+  overflow-x: hidden;
 }
 
 .sale-lines-table {
-  min-width: 900px;
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
 }
 
 .sale-lines-table th,
 .sale-lines-table td {
   vertical-align: middle;
+  padding: 8px 6px;
 }
 
 .sale-lines-table input:not([type="checkbox"]),
 .sale-lines-table select {
-  min-width: 100px;
-  padding: 8px 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 6px;
 }
 
 .sale-lines-table td:first-child .danger-btn {
-  padding: 8px 10px;
+  padding: 0;
 }
+
+.sale-lines-table td:first-child .sale-row-remove-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+}
+
+.sale-row-remove-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sale-lines-table th:first-child,
+.sale-lines-table td:first-child { width: 7%; }
+
+.treatment-lines-table th:nth-child(2), .treatment-lines-table td:nth-child(2) { width: 24%; }
+.treatment-lines-table th:nth-child(3), .treatment-lines-table td:nth-child(3) { width: 15%; }
+.treatment-lines-table th:nth-child(4), .treatment-lines-table td:nth-child(4) { width: 10%; }
+.treatment-lines-table th:nth-child(5), .treatment-lines-table td:nth-child(5) { width: 15%; }
+.treatment-lines-table th:nth-child(6), .treatment-lines-table td:nth-child(6) { width: 19%; }
+.treatment-lines-table th:nth-child(7), .treatment-lines-table td:nth-child(7) { width: 8%; }
+
+.item-lines-table th:nth-child(2), .item-lines-table td:nth-child(2) { width: 20%; }
+.item-lines-table th:nth-child(3), .item-lines-table td:nth-child(3) { width: 16%; }
+.item-lines-table th:nth-child(4), .item-lines-table td:nth-child(4) { width: 8%; }
+.item-lines-table th:nth-child(5), .item-lines-table td:nth-child(5) { width: 14%; }
+.item-lines-table th:nth-child(6), .item-lines-table td:nth-child(6) { width: 35%; }
 
 .sale-summary {
   position: sticky;
@@ -1195,5 +1260,107 @@ tbody tr:last-child td {
 @media (max-width: 620px) {
   .sale-header-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+.bill-filters {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.bill-filters label {
+  display: grid;
+  gap: 6px;
+  min-width: 170px;
+}
+
+.bill-filters label span {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.bill-actions {
+  min-width: 245px;
+  white-space: nowrap;
+}
+
+.bill-actions button {
+  margin: 2px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow: auto;
+  background: rgb(20 16 34 / 58%);
+}
+
+.bill-modal {
+  width: min(760px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.bill-modal table {
+  margin-bottom: 20px;
+}
+
+.bill-print-sheet {
+  display: none;
+}
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  .bill-print-sheet,
+  .bill-print-sheet * {
+    visibility: visible !important;
+  }
+
+  .bill-print-sheet {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    padding: 24px;
+    color: #111;
+    background: #fff;
+  }
+
+  .bill-print-sheet table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .bill-print-sheet th,
+  .bill-print-sheet td {
+    padding: 8px;
+    border: 1px solid #aaa;
+    text-align: left;
+  }
+
+  .bill-print-terms {
+    margin-top: 24px;
+    padding-top: 12px;
+    border-top: 1px solid #888;
+    break-inside: avoid;
+  }
+
+  .bill-print-terms h3 {
+    margin: 0 0 8px;
+  }
+
+  .bill-print-terms ol {
+    margin: 0;
+    padding-left: 22px;
   }
 }

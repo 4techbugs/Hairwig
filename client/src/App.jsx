@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserRouter, Navigate, Route, Routes, Link, NavLink, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import './App.css';
 
@@ -30,6 +30,7 @@ const emptyUser = {
   Email: '',
   Mobile: '',
   RoleName: 'User',
+  RoleCode: 'USER',
   BranchId: '',
 };
 
@@ -79,21 +80,23 @@ const emptyBill = {
   CustomerMobile: '',
   CustomerAddress: '',
   CustomerEmail: '',
-  BillDate: new Date().toISOString().slice(0, 10),
+  BillDate: getLocalDateKey(),
   NextServiceDate: '',
   PaymentMode: 'Cash',
 };
 
-const emptyPayment = {
-  SaleBillId: '',
-  BranchId: '',
-  CustomerId: '',
-  PaymentDate: new Date().toISOString().slice(0, 10),
-  PaymentMode: 'Cash',
-  Amount: 0,
-  ReferenceNumber: '',
-  Notes: '',
-};
+const formatINR = (value) => new Intl.NumberFormat('en-IN', {
+  style: 'currency',
+  currency: 'INR',
+  maximumFractionDigits: 2,
+}).format(Number(value || 0));
+
+function getLocalDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 function App() {
   const [auth, setAuth] = useState(() => {
@@ -146,8 +149,9 @@ function App() {
             <Route path="/treatments" element={<MasterPage key="/treatments" config={treatmentMasterConfig} />} />
             <Route path="/items" element={<MasterPage key="/items" config={itemMasterConfig} />} />
             <Route path="/users" element={<UsersPage />} />
-            <Route path="/roles" element={<RolesPage />} />
-            <Route path="/bills" element={<BillsPage />} />
+            <Route path="/roles" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/bills" element={<BillsPage key="/bills" />} />
+            <Route path="/bill-list" element={<BillsPage key="/bill-list" listOnly />} />
             <Route path="/payments" element={<PaymentsPage />} />
             <Route path="/reports" element={<ReportsPage />} />
           </Route>
@@ -159,13 +163,28 @@ function App() {
 
 const AuthContext = createContext(null);
 
+function getAuthRoleCode(user) {
+  const rawRole = String(user?.RoleCode || user?.roleCode || user?.RoleName || user?.role || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (rawRole === 'BRANCHADMIN') return 'BRANCH_ADMIN';
+  if (rawRole === 'SUPERADMIN') return 'SUPER_ADMIN';
+  return rawRole;
+}
+
 function useAuth() {
   return useContext(AuthContext);
 }
 
 function ProtectedAppLayout() {
-  const { auth, setAuth } = useAuth();
+  const { auth, setAuth, hasAccess } = useAuth();
   const navigate = useNavigate();
+  const currentRoleCode = getAuthRoleCode(auth.user);
+  const isRegularUser = currentRoleCode === 'USER';
+  const isBranchAdmin = currentRoleCode === 'BRANCH_ADMIN';
+  const hideOperationalMasters = isRegularUser || isBranchAdmin;
+  const canViewUsers = isBranchAdmin || hasAccess('users', 'canView');
 
   useEffect(() => {
     if (!auth.token) {
@@ -196,17 +215,17 @@ function ProtectedAppLayout() {
         <nav className="nav">
           <p className="nav-caption">Workspace</p>
           <NavLink to="/dashboard">Dashboard</NavLink>
-          <NavLink to="/branches">Branch Master</NavLink>
-          <NavLink to="/clients">Client Master</NavLink>
-          <NavLink to="/brands">Brand Master</NavLink>
-          <NavLink to="/units">Unit Master</NavLink>
-          <NavLink to="/groups">Group Master</NavLink>
-          <NavLink to="/treatments">Treatment Master</NavLink>
-          <NavLink to="/items">Item Master</NavLink>
-          <NavLink to="/users">Users</NavLink>
-          <NavLink to="/roles">Roles</NavLink>
+          {!hideOperationalMasters && <NavLink to="/branches">Branch Master</NavLink>}
+          {!hideOperationalMasters && <NavLink to="/clients">Client Master</NavLink>}
+          {!hideOperationalMasters && <NavLink to="/brands">Brand Master</NavLink>}
+          {!hideOperationalMasters && <NavLink to="/units">Unit Master</NavLink>}
+          {!hideOperationalMasters && <NavLink to="/groups">Group Master</NavLink>}
+          {!hideOperationalMasters && <NavLink to="/treatments">Treatment Master</NavLink>}
+          {!hideOperationalMasters && <NavLink to="/items">Item Master</NavLink>}
+          {!isRegularUser && canViewUsers && <NavLink to="/users">User Master</NavLink>}
           <NavLink to="/bills">Bills</NavLink>
-          <NavLink to="/payments">Payments</NavLink>
+          <NavLink to="/bill-list">Bill List</NavLink>
+          <NavLink to="/payments">Payment List</NavLink>
           <NavLink to="/reports">Reports</NavLink>
         </nav>
 
@@ -222,16 +241,17 @@ function ProtectedAppLayout() {
       <main className="main-panel">
         <Routes>
           <Route path="/dashboard" element={<DashboardPage />} />
-          <Route path="/branches" element={<BranchesPage />} />
-          <Route path="/clients" element={<MasterPage key="/clients" config={clientMasterConfig} />} />
-          <Route path="/brands" element={<MasterPage key="/brands" config={brandMasterConfig} />} />
-          <Route path="/units" element={<MasterPage key="/units" config={unitMasterConfig} />} />
-          <Route path="/groups" element={<MasterPage key="/groups" config={groupMasterConfig} />} />
-          <Route path="/treatments" element={<MasterPage key="/treatments" config={treatmentMasterConfig} />} />
-          <Route path="/items" element={<MasterPage key="/items" config={itemMasterConfig} />} />
-          <Route path="/users" element={<UsersPage />} />
-          <Route path="/roles" element={<RolesPage />} />
-          <Route path="/bills" element={<BillsPage />} />
+          <Route path="/branches" element={hideOperationalMasters ? <Navigate to="/dashboard" replace /> : <BranchesPage />} />
+          <Route path="/clients" element={hideOperationalMasters ? <Navigate to="/dashboard" replace /> : <MasterPage key="/clients" config={clientMasterConfig} />} />
+          <Route path="/brands" element={hideOperationalMasters ? <Navigate to="/dashboard" replace /> : <MasterPage key="/brands" config={brandMasterConfig} />} />
+          <Route path="/units" element={hideOperationalMasters ? <Navigate to="/dashboard" replace /> : <MasterPage key="/units" config={unitMasterConfig} />} />
+          <Route path="/groups" element={hideOperationalMasters ? <Navigate to="/dashboard" replace /> : <MasterPage key="/groups" config={groupMasterConfig} />} />
+          <Route path="/treatments" element={hideOperationalMasters ? <Navigate to="/dashboard" replace /> : <MasterPage key="/treatments" config={treatmentMasterConfig} />} />
+          <Route path="/items" element={hideOperationalMasters ? <Navigate to="/dashboard" replace /> : <MasterPage key="/items" config={itemMasterConfig} />} />
+          <Route path="/users" element={isRegularUser || !canViewUsers ? <Navigate to="/dashboard" replace /> : <UsersPage />} />
+          <Route path="/roles" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/bills" element={<BillsPage key="/bills" />} />
+          <Route path="/bill-list" element={<BillsPage key="/bill-list" listOnly />} />
           <Route path="/payments" element={<PaymentsPage />} />
           <Route path="/reports" element={<ReportsPage />} />
         </Routes>
@@ -307,6 +327,10 @@ function LoginPage() {
 
 function DashboardPage() {
   const { auth, hasAccess } = useAuth();
+  const roleCode = getAuthRoleCode(auth.user);
+  const hideOperationalMasterLinks = ['USER', 'BRANCH_ADMIN'].includes(roleCode);
+  const showUserMasterLink = roleCode !== 'USER'
+    && (roleCode === 'BRANCH_ADMIN' || hasAccess('users', 'canView'));
   const [stats, setStats] = useState({ totalBranches: 0, totalUsers: 0, totalBills: 0, totalPayments: 0, monthlyRevenue: 0, pendingCollection: 0 });
 
   useEffect(() => {
@@ -340,14 +364,14 @@ function DashboardPage() {
         <div className="card section-card">
           <h3>Quick Access</h3>
           <div className="quick-actions">
-            {hasAccess('branches', 'canView') && <Link to="/branches">Branch Master</Link>}
-            {hasAccess('clients', 'canView') && <Link to="/clients">Client Master</Link>}
-            {hasAccess('brands', 'canView') && <Link to="/brands">Brand Master</Link>}
-            {hasAccess('units', 'canView') && <Link to="/units">Unit Master</Link>}
-            {hasAccess('groups', 'canView') && <Link to="/groups">Group Master</Link>}
-            {hasAccess('treatments', 'canView') && <Link to="/treatments">Treatment Master</Link>}
-            {hasAccess('items', 'canView') && <Link to="/items">Item Master</Link>}
-            {hasAccess('users', 'canView') && <Link to="/users">User Master</Link>}
+            {!hideOperationalMasterLinks && hasAccess('branches', 'canView') && <Link to="/branches">Branch Master</Link>}
+            {!hideOperationalMasterLinks && hasAccess('clients', 'canView') && <Link to="/clients">Client Master</Link>}
+            {!hideOperationalMasterLinks && hasAccess('brands', 'canView') && <Link to="/brands">Brand Master</Link>}
+            {!hideOperationalMasterLinks && hasAccess('units', 'canView') && <Link to="/units">Unit Master</Link>}
+            {!hideOperationalMasterLinks && hasAccess('groups', 'canView') && <Link to="/groups">Group Master</Link>}
+            {!hideOperationalMasterLinks && hasAccess('treatments', 'canView') && <Link to="/treatments">Treatment Master</Link>}
+            {!hideOperationalMasterLinks && hasAccess('items', 'canView') && <Link to="/items">Item Master</Link>}
+            {showUserMasterLink && <Link to="/users">User Master</Link>}
             {hasAccess('bills', 'canView') && <Link to="/bills">Bill Management</Link>}
             {hasAccess('payments', 'canView') && <Link to="/payments">Payment Management</Link>}
             {hasAccess('reports', 'canView') && <Link to="/reports">Reports</Link>}
@@ -547,6 +571,41 @@ function BranchesPage() {
           </tbody>
         </table>
       </div>
+      {/*
+      {viewingBill && <div className="modal-backdrop" role="presentation" onClick={() => setViewingBill(null)}>
+        <section className="card bill-modal" role="dialog" aria-modal="true" aria-labelledby="bill-view-title" onClick={(event) => event.stopPropagation()}>
+          <div className="sale-section-heading"><h3 id="bill-view-title">Bill {viewingBill.BillNumber}</h3><button type="button" className="table-btn" onClick={() => setViewingBill(null)}>Close</button></div>
+          <p>{viewingBill.CustomerName} · {viewingBill.CustomerMobile} · {String(viewingBill.BillDate || '').slice(0, 10)}</p><p>{viewingBill.CustomerAddress}</p>
+          <h4>Treatments</h4><table><thead><tr><th>Treatment</th><th>Staff</th><th>Price</th></tr></thead><tbody>{viewingBill.Treatments?.map((row, index) => <tr key={`${row.TreatmentId}-${index}`}><td>{row.TreatmentName}</td><td>{row.StaffName}</td><td>{formatINR(row.Price)}</td></tr>)}</tbody></table>
+          <h4>Items</h4><table><thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Amount</th></tr></thead><tbody>{viewingBill.Items?.map((row, index) => <tr key={`${row.ItemId}-${index}`}><td>{row.ItemName}</td><td>{row.Quantity}</td><td>{row.Unit}</td><td>{formatINR(row.LineTotal)}</td></tr>)}</tbody></table>
+          <p><strong>Mode:</strong> {viewingBill.PaymentMode} <strong>Total:</strong> {formatINR(viewingBill.NetAmount)}</p>
+        </section>
+      </div>}
+      {editingBill && <div className="modal-backdrop" role="presentation" onClick={() => setEditingBill(null)}>
+        <section className="card bill-modal" role="dialog" aria-modal="true" aria-labelledby="bill-edit-title" onClick={(event) => event.stopPropagation()}>
+          <h3 id="bill-edit-title">Edit Bill {editingBill.BillNumber}</h3>
+          <p>Customer, bill date, and payment mode can be changed here. Billed line items and total remain as originally saved.</p>
+          <form className="grid-form" onSubmit={saveBillEdit}>
+            <label><span>Client name</span><input required maxLength={160} value={editingBill.CustomerName || ''} onChange={(event) => setEditingBill({ ...editingBill, CustomerName: event.target.value })} /></label>
+            <label><span>Mobile</span><input required maxLength={30} value={editingBill.CustomerMobile || ''} onChange={(event) => setEditingBill({ ...editingBill, CustomerMobile: event.target.value })} /></label>
+            <label className="full-width-field"><span>Address</span><textarea required maxLength={400} value={editingBill.CustomerAddress || ''} onChange={(event) => setEditingBill({ ...editingBill, CustomerAddress: event.target.value })} /></label>
+            <label><span>Email</span><input type="email" maxLength={254} value={editingBill.CustomerEmail || ''} onChange={(event) => setEditingBill({ ...editingBill, CustomerEmail: event.target.value })} /></label>
+            <label><span>Bill date</span><input type="date" required value={String(editingBill.BillDate || '').slice(0, 10)} onChange={(event) => setEditingBill({ ...editingBill, BillDate: event.target.value })} /></label>
+            <label><span>Payment mode</span><select value={editingBill.PaymentMode || 'Cash'} onChange={(event) => setEditingBill({ ...editingBill, PaymentMode: event.target.value })}><option>Cash</option><option>UPI</option><option>Card</option><option>Bank Transfer</option><option>MIX</option></select></label>
+            <div className="master-form-actions full-width-field"><button type="button" className="table-btn" onClick={() => setEditingBill(null)}>Cancel</button><button type="submit" className="primary-btn">Save changes</button></div>
+          </form>
+        </section>
+      </div>}
+      {printBill && <section className="bill-print-sheet">
+        <h1>HairWigHouse</h1><h2>Sale Bill {printBill.BillNumber}</h2><p>{printBill.BranchName} · {String(printBill.BillDate || '').slice(0, 10)}</p>
+        <h3>{printBill.CustomerName}</h3><p>{printBill.CustomerMobile} · {printBill.CustomerAddress}</p>
+        <table><thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>
+          {printBill.Treatments?.map((row, index) => <tr key={`pt-${index}`}><td>{row.TreatmentName}</td><td>1</td><td>{formatINR(row.Price)}</td><td>{formatINR(row.Price)}</td></tr>)}
+          {printBill.Items?.map((row, index) => <tr key={`pi-${index}`}><td>{row.ItemName}</td><td>{row.Quantity} {row.Unit}</td><td>{formatINR(row.Rate)}</td><td>{formatINR(row.LineTotal)}</td></tr>)}
+        </tbody></table><p><strong>Payment mode:</strong> {printBill.PaymentMode}</p><h2>Total: {formatINR(printBill.NetAmount)}</h2>
+        <section className="bill-print-terms"><h3>Terms &amp; Conditions</h3><ol>{printBill.Terms?.map((term, index) => <li key={term.TermId || term.TermText || index}>{typeof term === 'string' ? term : term.TermText}</li>)}</ol></section>
+      </section>}
+      */}
     </div>
   );
 }
@@ -696,26 +755,41 @@ function MasterPage({ config }) {
   const [form, setForm] = useState(config.emptyForm);
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
   const canAdd = hasAccess(config.module, 'canAdd');
   const canEdit = hasAccess(config.module, 'canEdit');
   const canDelete = hasAccess(config.module, 'canDelete');
 
   const loadRecords = useCallback(async () => {
-    try {
-      const optionFields = config.fields.filter((field) => field.optionsEndpoint);
-      const responses = await Promise.all([
-        api.get(config.endpoint),
-        ...optionFields.map((field) => api.get(field.optionsEndpoint)),
-      ]);
-      setRecords(responses[0].data);
-      setDropdownOptions(Object.fromEntries(optionFields.map((field, index) => [
-        field.optionsEndpoint,
-        responses[index + 1].data.filter((option) => option.IsActive),
-      ])));
-    } catch (requestError) {
-      console.error(`Failed loading ${config.title}`, requestError);
-      setError(requestError.response?.data?.message || `Failed loading ${config.title.toLowerCase()}.`);
+    setLoading(true);
+    setError('');
+    const optionFields = config.fields.filter((field) => field.optionsEndpoint);
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const responses = await Promise.all([
+          api.get(config.endpoint, { timeout: 15000 }),
+          ...optionFields.map((field) => api.get(field.optionsEndpoint, { timeout: 15000 })),
+        ]);
+        const data = responses[0].data;
+        if (!Array.isArray(data)) throw new Error('The server returned an invalid records response.');
+        setRecords(data);
+        setDropdownOptions(Object.fromEntries(optionFields.map((field, index) => [
+          field.optionsEndpoint,
+          (Array.isArray(responses[index + 1].data) ? responses[index + 1].data : [])
+            .filter((option) => option.IsActive),
+        ])));
+        setLoading(false);
+        return true;
+      } catch (requestError) {
+        lastError = requestError;
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      }
     }
+    console.error(`Failed loading ${config.title}`, lastError);
+    setError(lastError.response?.data?.message || `Could not load ${config.title.toLowerCase()}. Check the server connection and retry.`);
+    setLoading(false);
+    return false;
   }, [config.endpoint, config.fields, config.title]);
 
   useEffect(() => {
@@ -760,7 +834,7 @@ function MasterPage({ config }) {
   return (
     <div>
       <PageHeader title={config.title} subtitle={config.subtitle} />
-      {error && <div className="error-box">{error}</div>}
+      {error && <div className="error-box" role="alert">{error} <button type="button" className="table-btn" onClick={loadRecords}>Retry</button></div>}
       {(canAdd || editingId) && (
         <div className="card form-card">
           <h3>{editingId ? `Edit ${config.title.replace(' Master', '')}` : `Add ${config.title.replace(' Master', '')}`}</h3>
@@ -826,6 +900,8 @@ function MasterPage({ config }) {
             </tr>
           </thead>
           <tbody>
+            {loading && <tr><td colSpan={config.columns.length + 1 + (canEdit || canDelete ? 1 : 0)}>Loading records…</td></tr>}
+            {!loading && !error && records.length === 0 && <tr><td colSpan={config.columns.length + 1 + (canEdit || canDelete ? 1 : 0)}>No records found.</td></tr>}
             {records.map((record) => (
               <tr key={record[config.idField]}>
                 {config.columns.map((column) => (
@@ -862,14 +938,16 @@ function MasterPage({ config }) {
 }
 
 function UsersPage() {
-  const { hasAccess } = useAuth();
+  const { auth, hasAccess } = useAuth();
   const [users, setUsers] = useState([]);
   const [branches, setBranches] = useState([]);
+  const [availableRoles, setAvailableRoles] = useState([]);
   const [form, setForm] = useState(emptyUser);
   const [error, setError] = useState('');
   const [editingUserId, setEditingUserId] = useState(null);
 
-  const canAdd = hasAccess('users', 'canAdd');
+  const isBranchAdmin = getAuthRoleCode(auth.user) === 'BRANCH_ADMIN';
+  const canAdd = isBranchAdmin || hasAccess('users', 'canAdd');
   const canEdit = hasAccess('users', 'canEdit');
   const canDelete = hasAccess('users', 'canDelete');
 
@@ -892,10 +970,21 @@ function UsersPage() {
     }
   };
 
+  const loadAssignableRoles = async () => {
+    try {
+      const response = await api.get('/user-roles');
+      setAvailableRoles(response.data);
+    } catch (requestError) {
+      console.error('Failed loading roles for user form', requestError);
+      setError(requestError.response?.data?.message || 'Failed loading roles for user form.');
+    }
+  };
+
   useEffect(() => {
     loadUsers();
     loadBranches();
-  }, []);
+    if (canAdd) loadAssignableRoles();
+  }, [canAdd]);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -915,12 +1004,9 @@ function UsersPage() {
   };
 
   const handleEdit = (user) => {
-    const role = String(user.RoleCode || user.RoleName || '').replace(/[^a-z]/gi, '').toLowerCase();
-    const roleName = role === 'superadmin'
-      ? 'SuperAdmin'
-      : role === 'branchadmin'
-        ? 'BranchAdmin'
-        : 'User';
+    const assignedRole = availableRoles.find((role) => role.RoleCode === user.RoleCode)
+      || availableRoles.find((role) => role.RoleName === user.RoleName);
+    const roleName = assignedRole?.RoleName || user.RoleName || 'User';
 
     setEditingUserId(user.UserId);
     setForm({
@@ -930,7 +1016,8 @@ function UsersPage() {
       Email: user.Email || '',
       Mobile: user.Mobile || '',
       RoleName: roleName,
-      BranchId: roleName === 'SuperAdmin' ? '' : user.BranchId || '',
+      RoleCode: assignedRole?.RoleCode || user.RoleCode || 'USER',
+      BranchId: assignedRole?.RoleCode === 'SUPER_ADMIN' ? '' : user.BranchId || '',
     });
     setError('');
   };
@@ -953,6 +1040,9 @@ function UsersPage() {
     }
   };
 
+  const selectedRole = availableRoles.find((role) => role.RoleCode === form.RoleCode);
+  const isSuperAdminRole = selectedRole?.RoleCode === 'SUPER_ADMIN';
+
   return (
     <div>
       <PageHeader title="User Master" subtitle="Manage users and access" />
@@ -963,7 +1053,7 @@ function UsersPage() {
           <h3>{editingUserId ? 'Edit User' : 'Add User'}</h3>
           <form onSubmit={handleSubmit} className="grid-form">
             <input placeholder="Full Name" value={form.FullName} onChange={(e) => setForm({ ...form, FullName: e.target.value })} required />
-            <input placeholder="Username" value={form.Username} onChange={(e) => setForm({ ...form, Username: e.target.value })} required disabled={Boolean(editingUserId)} />
+            <input placeholder="Username" value={form.Username} onChange={(e) => setForm({ ...form, Username: e.target.value })} required disabled={Boolean(editingUserId)} autoComplete="username" />
             <input
               type="password"
               placeholder={editingUserId ? 'New password (optional)' : 'Password'}
@@ -971,25 +1061,29 @@ function UsersPage() {
               onChange={(e) => setForm({ ...form, Password: e.target.value })}
               required={!editingUserId}
             />
-            <input type="email" placeholder="Email" value={form.Email} onChange={(e) => setForm({ ...form, Email: e.target.value })} required />
-            <input placeholder="Mobile" value={form.Mobile} onChange={(e) => setForm({ ...form, Mobile: e.target.value })} />
+            <input type="email" placeholder="Email" value={form.Email} onChange={(e) => setForm({ ...form, Email: e.target.value })} required autoComplete="email" />
+            <input type="tel" placeholder="Mobile" value={form.Mobile} onChange={(e) => setForm({ ...form, Mobile: e.target.value })} required maxLength={60} autoComplete="tel" />
             <select
-              value={form.RoleName}
-              onChange={(e) => setForm({
-                ...form,
-                RoleName: e.target.value,
-                BranchId: e.target.value === 'SuperAdmin' ? '' : form.BranchId,
-              })}
+              value={form.RoleCode}
+              onChange={(e) => {
+                const role = availableRoles.find((item) => item.RoleCode === e.target.value);
+                setForm({
+                  ...form,
+                  RoleName: role?.RoleName || '',
+                  RoleCode: role?.RoleCode || '',
+                  BranchId: role?.RoleCode === 'SUPER_ADMIN' ? '' : form.BranchId,
+                });
+              }}
             >
-              <option value="SuperAdmin">SuperAdmin</option>
-              <option value="BranchAdmin">BranchAdmin</option>
-              <option value="User">User</option>
+              {availableRoles.map((role) => (
+                <option key={role.RoleId} value={role.RoleCode}>{role.RoleName}</option>
+              ))}
             </select>
             <select
-              value={form.RoleName === 'SuperAdmin' ? '' : form.BranchId}
+              value={isSuperAdminRole ? '' : form.BranchId}
               onChange={(e) => setForm({ ...form, BranchId: e.target.value })}
-              disabled={form.RoleName === 'SuperAdmin'}
-              required={form.RoleName !== 'SuperAdmin'}
+              disabled={isSuperAdminRole}
+              required={!isSuperAdminRole}
             >
               <option value="">Select branch</option>
               {branches.map((branch) => (
@@ -1047,88 +1141,57 @@ function UsersPage() {
   );
 }
 
-function RolesPage() {
-  const { hasAccess } = useAuth();
-  const [roles, setRoles] = useState([]);
-
-  useEffect(() => {
-    if (hasAccess('roles', 'canView')) {
-      api.get('/roles').then((response) => setRoles(response.data)).catch(() => {});
-    }
-  }, [hasAccess]);
-
-  return (
-    <div>
-      <PageHeader title="Role Master" subtitle="Dynamic permissions" />
-
-      <div className="card list-card">
-        <table>
-          <thead>
-            <tr>
-              <th>Role</th>
-              <th>Description</th>
-              <th>Dashboard</th>
-              <th>Branches</th>
-              <th>Users</th>
-              <th>Reports</th>
-            </tr>
-          </thead>
-          <tbody>
-            {roles.map((role) => (
-              <tr key={role.RoleId}>
-                <td>{role.RoleName}</td>
-                <td>{role.Description}</td>
-                <td>{role.permissions?.dashboard?.canView ? 'Yes' : 'No'}</td>
-                <td>{role.permissions?.branches?.canView ? 'Yes' : 'No'}</td>
-                <td>{role.permissions?.users?.canView ? 'Yes' : 'No'}</td>
-                <td>{role.permissions?.reports?.canView ? 'Yes' : 'No'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function BillsPage() {
+function BillsPage({ listOnly = false }) {
   const { auth, hasAccess } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [bills, setBills] = useState([]);
   const [branches, setBranches] = useState([]);
   const [treatments, setTreatments] = useState([]);
   const [items, setItems] = useState([]);
   const [form, setForm] = useState({ ...emptyBill, BranchId: auth.user?.BranchId || '' });
   const [treatmentRows, setTreatmentRows] = useState([{ TreatmentId: '', StaffName: '', TaxRate: 0, GSTAmount: 0, Price: 0, IsPrinted: false }]);
-  const [itemRows, setItemRows] = useState([{ ItemId: '', Quantity: 1, Remarks: '' }]);
+  const [itemRows, setItemRows] = useState([{ ItemId: '', Quantity: 1, Rate: '', Remarks: '' }]);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [billListError, setBillListError] = useState('');
+  const [billFilters, setBillFilters] = useState({ fromDate: '', toDate: '', paymentMode: '' });
+  const [viewingBill, setViewingBill] = useState(null);
+  const [editingBill, setEditingBill] = useState(null);
+  const [printBill, setPrintBill] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [billNumberPreview, setBillNumberPreview] = useState({ key: '', value: '', error: '' });
+  const [billNumberPreviewRefresh, setBillNumberPreviewRefresh] = useState(0);
   const [clientLookupStatus, setClientLookupStatus] = useState({ type: '', message: '' });
   const autofilledClientRef = useRef(null);
 
   const loadBills = useCallback(async () => {
     try {
-      const response = await api.get('/bills');
+      const params = listOnly ? billFilters : {};
+      const response = await api.get('/bills', { params });
       setBills(response.data);
+      setBillListError('');
     } catch (requestError) {
       console.error('Failed loading bills', requestError);
-      setError(requestError.response?.data?.message || 'Failed loading bills.');
+      setBillListError(requestError.response?.data?.message || 'Failed loading bills.');
     }
-  }, []);
+  }, [billFilters, listOnly]);
+
+  useEffect(() => {
+    loadBills();
+  }, [loadBills]);
 
   useEffect(() => {
     let active = true;
     const loadSaleOptions = async () => {
       try {
-        const [treatmentResponse, itemResponse, billResponse] = await Promise.all([
+        const [treatmentResponse, itemResponse] = await Promise.all([
           api.get('/treatments'),
           api.get('/items'),
-          api.get('/bills'),
         ]);
         if (!active) return;
         setTreatments(treatmentResponse.data.filter((treatment) => treatment.IsActive));
         setItems(itemResponse.data.filter((item) => item.IsActive));
-        setBills(billResponse.data);
       } catch (requestError) {
         if (active) {
           console.error('Failed loading sale options', requestError);
@@ -1160,6 +1223,44 @@ function BillsPage() {
   }, [auth.user?.BranchId, hasAccess]);
 
   useEffect(() => {
+    const key = `${form.BranchId}|${form.BillDate}`;
+    if (!form.BranchId || !form.BillDate) return undefined;
+
+    let active = true;
+    api.get('/bills/number-preview', {
+      params: { branchId: form.BranchId, billDate: form.BillDate },
+    }).then((response) => {
+      if (active) {
+        setBillNumberPreview({ key, value: response.data.BillNumber, error: '' });
+        setError((current) => (
+          current === 'The generated bill number already exists. Try saving again.' ? '' : current
+        ));
+      }
+    }).catch((requestError) => {
+      console.error('Failed loading bill number preview', requestError);
+      if (active) {
+        setBillNumberPreview({
+          key,
+          value: '',
+          error: requestError.response?.data?.message || 'Could not load the bill number preview.',
+        });
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [form.BranchId, form.BillDate, billNumberPreviewRefresh]);
+
+  const currentBillPreviewKey = `${form.BranchId}|${form.BillDate}`;
+  const currentBillNumberPreview = billNumberPreview.key === currentBillPreviewKey
+    ? billNumberPreview.value
+    : '';
+  const currentBillNumberPreviewError = billNumberPreview.key === currentBillPreviewKey
+    ? billNumberPreview.error
+    : '';
+
+  useEffect(() => {
     const contactNo = form.CustomerMobile.trim();
     if (!contactNo) return undefined;
 
@@ -1170,7 +1271,7 @@ function BillsPage() {
         const response = await api.get('/clients/lookup', { params: { contactNo } });
         if (!active) return;
         if (!response.data) {
-          setClientLookupStatus({ type: 'not-found', message: 'No matching client found. Enter the details manually.' });
+          setClientLookupStatus({ type: 'not-found', message: 'Client is not in Client Master. You can still save this bill with the details entered here.' });
           return;
         }
 
@@ -1231,12 +1332,12 @@ function BillsPage() {
   ), 0);
   const itemTotal = itemRows.reduce((total, row) => {
     const item = items.find((option) => String(option.ItemId) === String(row.ItemId));
-    return total + (item ? Number(item.TotalPrice || 0) * Number(row.Quantity || 0) : 0);
+    return total + (row.ItemId ? Number(row.Rate ?? item?.TotalPrice ?? 0) * Number(row.Quantity || 0) : 0);
   }, 0);
   const itemTax = itemRows.reduce((total, row) => {
     const item = items.find((option) => String(option.ItemId) === String(row.ItemId));
-    return total + (item
-      ? calculateInclusiveTax(Number(item.TotalPrice || 0) * Number(row.Quantity || 0), Number(item.TaxRate || 0))
+    return total + (row.ItemId
+      ? calculateInclusiveTax(Number(row.Rate ?? item?.TotalPrice ?? 0) * Number(row.Quantity || 0), Number(row.TaxRate ?? item?.TaxRate ?? 0))
       : 0);
   }, 0);
   const grossTotal = treatmentTotal + itemTotal;
@@ -1261,8 +1362,9 @@ function BillsPage() {
   };
 
   const handleItemChange = (index, itemId) => {
+    const selected = items.find((item) => String(item.ItemId) === itemId);
     setItemRows((current) => current.map((row, rowIndex) => (
-      rowIndex === index ? { ...row, ItemId: itemId } : row
+      rowIndex === index ? { ...row, ItemId: itemId, Rate: selected?.TotalPrice ?? '' } : row
     )));
   };
 
@@ -1273,6 +1375,7 @@ function BillsPage() {
     setSaving(true);
     const payload = {
       ...form,
+      CustomerEmail: String(form.CustomerEmail || '').trim(),
       Treatments: treatmentRows.filter((row) => row.TreatmentId).map(({ TreatmentId, StaffName, IsPrinted, Price, GSTAmount }) => ({
         TreatmentId,
         StaffName,
@@ -1280,39 +1383,158 @@ function BillsPage() {
         Price: Number(Price),
         GSTAmount: Number(GSTAmount),
       })),
-      Items: itemRows.filter((row) => row.ItemId).map(({ ItemId, Quantity, Remarks }) => ({
+      Items: itemRows.filter((row) => row.ItemId).map(({ ItemId, Quantity, Rate, Remarks }) => ({
         ItemId,
         Quantity: Number(Quantity),
+        Rate: Number(Rate || 0),
         Remarks,
       })),
     };
     try {
-      const response = await api.post('/bills', payload);
-      setSuccess(`Sale bill ${response.data.BillNumber} saved.`);
+      const response = editingBill
+        ? await api.put(`/bills/${editingBill.SaleBillId}`, payload)
+        : await api.post('/bills', payload);
+      setSuccess(editingBill
+        ? `Bill ${editingBill.BillNumber} updated. Client saved to Client Master.`
+        : `Sale bill ${response.data.BillNumber} saved. Client saved to Client Master.`);
+      if (!editingBill) setBillNumberPreviewRefresh((current) => current + 1);
+      setEditingBill(null);
       autofilledClientRef.current = null;
       setClientLookupStatus({ type: '', message: '' });
       setForm({ ...emptyBill, BranchId: form.BranchId });
       setTreatmentRows([{ TreatmentId: '', StaffName: '', TaxRate: 0, GSTAmount: 0, Price: 0, IsPrinted: false }]);
-      setItemRows([{ ItemId: '', Quantity: 1, Remarks: '' }]);
+      setItemRows([{ ItemId: '', Quantity: 1, Rate: '', Remarks: '' }]);
       await loadBills();
     } catch (requestError) {
-      setError(requestError.response?.data?.message || 'Failed to save sale bill.');
+      if (requestError.response?.status === 409) {
+        setBillNumberPreviewRefresh((current) => current + 1);
+      }
+      setError(requestError.response?.data?.message || `Failed to ${editingBill ? 'update' : 'save'} sale bill.`);
     } finally {
       setSaving(false);
     }
   };
 
+  const populateBillForm = useCallback((bill) => {
+    setForm({
+      BranchId: bill.BranchId || '',
+      CustomerName: bill.CustomerName || '',
+      CustomerMobile: bill.CustomerMobile || '',
+      CustomerAddress: bill.CustomerAddress || '',
+      CustomerEmail: bill.CustomerEmail || '',
+      BillDate: String(bill.BillDate || '').slice(0, 10),
+      NextServiceDate: String(bill.NextServiceDate || '').slice(0, 10),
+      PaymentMode: bill.PaymentMode || 'Cash',
+    });
+    setTreatmentRows(bill.Treatments?.length
+      ? bill.Treatments.map((row) => ({
+        TreatmentId: String(row.TreatmentId),
+        TreatmentName: row.TreatmentName || '',
+        StaffName: row.StaffName || '',
+        TaxRate: Number(row.TaxRate || 0),
+        GSTAmount: Number(row.GSTAmount || 0),
+        Price: Number(row.Price || 0),
+        IsPrinted: Boolean(row.IsPrinted),
+      }))
+      : [{ TreatmentId: '', StaffName: '', TaxRate: 0, GSTAmount: 0, Price: 0, IsPrinted: false }]);
+    setItemRows(bill.Items?.length
+      ? bill.Items.map((row) => ({
+        ItemId: String(row.ItemId),
+        ItemName: row.ItemName || '',
+        Unit: row.Unit || '',
+        TaxRate: Number(row.TaxRate || 0),
+        Quantity: Number(row.Quantity || 1),
+        Rate: Number(row.Rate || 0),
+        Remarks: row.Remarks || '',
+      }))
+      : [{ ItemId: '', Quantity: 1, Rate: '', Remarks: '' }]);
+    setEditingBill({ SaleBillId: bill.SaleBillId, BillNumber: bill.BillNumber });
+    setError('');
+    setSuccess('');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
+  useEffect(() => {
+    const editBillId = location.state?.editBillId;
+    if (!editBillId || listOnly) return undefined;
+    let active = true;
+    api.get(`/bills/${editBillId}`).then((response) => {
+      if (active) populateBillForm(response.data);
+    }).catch((requestError) => {
+      if (active) setBillListError(requestError.response?.data?.message || 'Could not load bill for editing.');
+    }).finally(() => {
+      if (active) navigate('/bills', { replace: true, state: null });
+    });
+    return () => { active = false; };
+  }, [location.state?.editBillId, listOnly, navigate, populateBillForm]);
+
+  const fetchBillDetail = async (bill, mode) => {
+    setBillListError('');
+    if (mode === 'edit' && listOnly) {
+      navigate('/bills', { state: { editBillId: bill.SaleBillId } });
+      return;
+    }
+    try {
+      const response = await api.get(`/bills/${bill.SaleBillId}`);
+      if (mode === 'edit') populateBillForm(response.data);
+      if (mode === 'view') setViewingBill(response.data);
+      if (mode === 'print') setPrintBill(response.data);
+    } catch (requestError) {
+      setBillListError(requestError.response?.data?.message || 'Could not load bill details.');
+    }
+  };
+
+  const cancelBillEdit = () => {
+    setEditingBill(null);
+    setError('');
+    setForm({ ...emptyBill, BranchId: auth.user?.BranchId || branches[0]?.BranchId || '' });
+    setTreatmentRows([{ TreatmentId: '', StaffName: '', TaxRate: 0, GSTAmount: 0, Price: 0, IsPrinted: false }]);
+    setItemRows([{ ItemId: '', Quantity: 1, Rate: '', Remarks: '' }]);
+  };
+
+  const deleteBill = async (bill) => {
+    if (!window.confirm(`Cancel bill ${bill.BillNumber}? Bills with recorded payments cannot be deleted.`)) return;
+    setBillListError('');
+    try {
+      await api.delete(`/bills/${bill.SaleBillId}`);
+      await loadBills();
+    } catch (requestError) {
+      setBillListError(requestError.response?.data?.message || 'Could not cancel bill.');
+    }
+  };
+
+  useEffect(() => {
+    if (!printBill) return undefined;
+    const timer = setTimeout(() => window.print(), 100);
+    const clearPrintBill = () => setPrintBill(null);
+    window.addEventListener('afterprint', clearPrintBill);
+    return () => { clearTimeout(timer); window.removeEventListener('afterprint', clearPrintBill); };
+  }, [printBill]);
+
   return (
     <div>
-      <PageHeader title="Sale" subtitle="Create treatment and item sale bills" />
+      <PageHeader
+        title={listOnly ? 'Bill List' : 'Bills'}
+        subtitle={listOnly ? 'Filter and manage bills by date and payment mode' : 'Create sale bills and review bills'}
+      />
       {error && <div className="error-box">{error}</div>}
       {success && <div className="success-box">{success}</div>}
-      {hasAccess('bills', 'canAdd') && (
+      {!listOnly && (hasAccess('bills', 'canAdd') || (editingBill && hasAccess('bills', 'canEdit'))) && (
         <form className="sale-form" onSubmit={handleSubmit}>
           <div className="sale-layout">
             <div className="sale-main">
               <section className="card form-card">
-                <h3>Client &amp; Bill Details</h3>
+                <div className="sale-section-heading"><h3>{editingBill ? `Edit Bill ${editingBill.BillNumber}` : 'Client & Bill Details'}</h3>{editingBill && <button type="button" className="table-btn" onClick={cancelBillEdit}>Cancel Edit</button>}</div>
+                <div className="bill-number-preview" aria-live="polite">
+                  <span>Bill No.</span>
+                  <strong>
+                    {editingBill?.BillNumber || currentBillNumberPreview
+                      || (currentBillNumberPreviewError ? 'Unavailable' : form.BranchId ? 'Loading...' : 'Select a branch')}
+                  </strong>
+                  <small>
+                    {currentBillNumberPreviewError || 'Preview only; the final number is confirmed when saved.'}
+                  </small>
+                </div>
                 <div className="sale-header-grid">
                   {hasAccess('branches', 'canView') && (
                     <label>
@@ -1342,7 +1564,7 @@ function BillsPage() {
                   </label>
                   <label>
                     <span>E-mail</span>
-                    <input type="email" value={form.CustomerEmail} onChange={(event) => setForm({ ...form, CustomerEmail: event.target.value })} maxLength={254} />
+                    <input type="email" value={form.CustomerEmail} onChange={(event) => setForm({ ...form, CustomerEmail: event.target.value })} onBlur={(event) => setForm((current) => ({ ...current, CustomerEmail: event.target.value.trim() }))} maxLength={254} />
                   </label>
                   <label>
                     <span>Date</span>
@@ -1371,17 +1593,18 @@ function BillsPage() {
                   <button type="button" className="primary-btn" onClick={() => setTreatmentRows([...treatmentRows, { TreatmentId: '', StaffName: '', TaxRate: 0, GSTAmount: 0, Price: 0, IsPrinted: false }])}>Add Row</button>
                 </div>
                 <div className="sale-table-scroll">
-                  <table className="sale-lines-table">
+                  <table className="sale-lines-table treatment-lines-table">
                     <thead>
                       <tr><th>Action</th><th>Treatment Name</th><th>Staff Name</th><th>GST %</th><th>GST Amount</th><th>Price</th><th>Print</th></tr>
                     </thead>
                     <tbody>
                       {treatmentRows.map((row, index) => (
                         <tr key={`treatment-${index}`}>
-                          <td><button type="button" className="danger-btn" onClick={() => setTreatmentRows(treatmentRows.filter((_, rowIndex) => rowIndex !== index))} aria-label="Remove treatment">Remove</button></td>
+                          <td><button type="button" className="danger-btn sale-row-remove-btn" onClick={() => setTreatmentRows(treatmentRows.filter((_, rowIndex) => rowIndex !== index))} aria-label="Remove treatment" title="Remove treatment"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m3 0-.9 14H5.9L5 6m4 4v6m6-6v6" /></svg></button></td>
                           <td>
                             <select value={row.TreatmentId} onChange={(event) => handleTreatmentChange(index, event.target.value)}>
                               <option value="">{treatments.length ? 'Select treatment' : 'No treatments in Treatment Master'}</option>
+                              {row.TreatmentId && !treatments.some((treatment) => String(treatment.TreatmentId) === String(row.TreatmentId)) && <option value={row.TreatmentId}>{row.TreatmentName || 'Previously selected treatment'}</option>}
                               {treatments.map((treatment) => <option key={treatment.TreatmentId} value={treatment.TreatmentId}>{treatment.TreatmentName}</option>)}
                             </select>
                           </td>
@@ -1429,10 +1652,10 @@ function BillsPage() {
               <section className="card list-card sale-lines-card">
                 <div className="sale-section-heading">
                   <h3>Row Items</h3>
-                  <button type="button" className="primary-btn" onClick={() => setItemRows([...itemRows, { ItemId: '', Quantity: 1, Remarks: '' }])}>Add Row</button>
+                  <button type="button" className="primary-btn" onClick={() => setItemRows([...itemRows, { ItemId: '', Quantity: 1, Rate: '', Remarks: '' }])}>Add Row</button>
                 </div>
                 <div className="sale-table-scroll">
-                  <table className="sale-lines-table">
+                  <table className="sale-lines-table item-lines-table">
                     <thead>
                       <tr><th>Action</th><th>Item Name</th><th>Quantity</th><th>Unit</th><th>Price</th><th>Remarks</th></tr>
                     </thead>
@@ -1441,10 +1664,11 @@ function BillsPage() {
                         const selectedItem = items.find((item) => String(item.ItemId) === String(row.ItemId));
                         return (
                           <tr key={`item-${index}`}>
-                            <td><button type="button" className="danger-btn" onClick={() => setItemRows(itemRows.filter((_, rowIndex) => rowIndex !== index))} aria-label="Remove item">Remove</button></td>
+                            <td><button type="button" className="danger-btn sale-row-remove-btn" onClick={() => setItemRows(itemRows.filter((_, rowIndex) => rowIndex !== index))} aria-label="Remove item" title="Remove item"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m3 0-.9 14H5.9L5 6m4 4v6m6-6v6" /></svg></button></td>
                             <td>
                               <select value={row.ItemId} onChange={(event) => handleItemChange(index, event.target.value)}>
                                 <option value="">{items.length ? 'Select item' : 'No items in Item Master'}</option>
+                                {row.ItemId && !items.some((item) => String(item.ItemId) === String(row.ItemId)) && <option value={row.ItemId}>{row.ItemName || 'Previously selected item'}</option>}
                                 {items.map((item) => <option key={item.ItemId} value={item.ItemId}>{item.ItemName}</option>)}
                               </select>
                             </td>
@@ -1468,7 +1692,7 @@ function BillsPage() {
               <div><span>GST included</span><strong>₹{gstTotal.toFixed(2)}</strong></div>
               <div className="sale-grand-total"><span>Total Amount</span><strong>₹{grandTotal.toFixed(2)}</strong></div>
               <button type="submit" className="primary-btn" disabled={saving || !form.BranchId}>
-                {saving ? 'Saving Sale...' : 'Save Sale'}
+                {saving ? (editingBill ? 'Updating Bill...' : 'Saving Sale...') : (editingBill ? 'Update Bill' : 'Save Sale')}
               </button>
               {!form.BranchId && <small>Select a branch or sign in with a branch assigned to your user.</small>}
             </aside>
@@ -1477,11 +1701,21 @@ function BillsPage() {
       )}
 
       <div className="card list-card">
-        <h3>Recent Sales</h3>
+        <h3>{listOnly ? 'Filtered Bills' : 'Bills'}</h3>
+        {listOnly && <div className="bill-filters">
+          <label><span>From date</span><input type="date" value={billFilters.fromDate} onChange={(event) => setBillFilters({ ...billFilters, fromDate: event.target.value })} /></label>
+          <label><span>To date</span><input type="date" value={billFilters.toDate} onChange={(event) => setBillFilters({ ...billFilters, toDate: event.target.value })} /></label>
+          <label><span>Payment mode</span><select value={billFilters.paymentMode} onChange={(event) => setBillFilters({ ...billFilters, paymentMode: event.target.value })}>
+            <option value="">All modes</option><option>Cash</option><option>UPI</option><option>Card</option><option>Bank Transfer</option><option>MIX</option>
+          </select></label>
+          <button type="button" className="table-btn" onClick={() => setBillFilters({ fromDate: '', toDate: '', paymentMode: '' })}>Clear filters</button>
+        </div>}
+        {billListError && <div className="error-box" role="alert">{billListError}</div>}
+        <div className="sale-table-scroll">
         <table>
           <thead>
             <tr>
-              <th>Bill Number</th><th>Client</th><th>Date</th><th>Branch</th><th>Amount</th>
+              <th>Bill Number</th><th>Client</th><th>Mobile</th><th>Date</th><th>Branch</th><th>Payment details</th><th>Total</th><th>Paid</th><th>Balance</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1489,14 +1723,44 @@ function BillsPage() {
               <tr key={bill.SaleBillId || bill.BillNumber}>
                 <td>{bill.BillNumber}</td>
                 <td>{bill.CustomerName}</td>
+                <td>{bill.CustomerMobile}</td>
                 <td>{String(bill.BillDate || '').slice(0, 10)}</td>
                 <td>{bill.BranchName || 'Head Office'}</td>
-                <td>₹{Number(bill.NetAmount ?? bill.GrandTotal ?? 0).toLocaleString()}</td>
+                <td>{bill.PaymentDetails || bill.PaymentMode || '—'}</td>
+                <td>{formatINR(bill.NetAmount ?? bill.GrandTotal)}</td>
+                <td>{formatINR(bill.PaidAmount)}</td>
+                <td>{formatINR(Math.max(0, Number(bill.NetAmount ?? bill.GrandTotal ?? 0) - Number(bill.PaidAmount || 0)))}</td>
+                <td className="bill-actions">
+                  <button type="button" className="table-btn" onClick={() => fetchBillDetail(bill, 'view')}>View</button>
+                  {hasAccess('bills', 'canEdit') && <button type="button" className="table-btn" onClick={() => fetchBillDetail(bill, 'edit')}>Edit</button>}
+                  <button type="button" className="table-btn" onClick={() => fetchBillDetail(bill, 'print')}>Print</button>
+                  {hasAccess('bills', 'canDelete') && <button type="button" className="danger-btn" onClick={() => deleteBill(bill)}>Delete</button>}
+                </td>
               </tr>
             ))}
+            {!bills.length && <tr><td colSpan="10">No bills match these filters.</td></tr>}
           </tbody>
         </table>
+        </div>
       </div>
+      {viewingBill && <div className="modal-backdrop" role="presentation" onClick={() => setViewingBill(null)}>
+        <section className="card bill-modal" role="dialog" aria-modal="true" aria-labelledby="bill-view-title" onClick={(event) => event.stopPropagation()}>
+          <div className="sale-section-heading"><h3 id="bill-view-title">Bill {viewingBill.BillNumber}</h3><button type="button" className="table-btn" onClick={() => setViewingBill(null)}>Close</button></div>
+          <p>{viewingBill.CustomerName} · {viewingBill.CustomerMobile} · {String(viewingBill.BillDate || '').slice(0, 10)}</p><p>{viewingBill.CustomerAddress}</p>
+          <h4>Treatments</h4><table><thead><tr><th>Treatment</th><th>Staff</th><th>Price</th></tr></thead><tbody>{viewingBill.Treatments?.map((row, index) => <tr key={`${row.TreatmentId}-${index}`}><td>{row.TreatmentName}</td><td>{row.StaffName}</td><td>{formatINR(row.Price)}</td></tr>)}</tbody></table>
+          <h4>Items</h4><table><thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Amount</th></tr></thead><tbody>{viewingBill.Items?.map((row, index) => <tr key={`${row.ItemId}-${index}`}><td>{row.ItemName}</td><td>{row.Quantity}</td><td>{row.Unit}</td><td>{formatINR(row.LineTotal)}</td></tr>)}</tbody></table>
+          <p><strong>Mode:</strong> {viewingBill.PaymentMode} <strong>Total:</strong> {formatINR(viewingBill.NetAmount)}</p>
+        </section>
+      </div>}
+      {printBill && <section className="bill-print-sheet">
+        <h1>HairWigHouse</h1><h2>Sale Bill {printBill.BillNumber}</h2><p>{printBill.BranchName} · {String(printBill.BillDate || '').slice(0, 10)}</p>
+        <h3>{printBill.CustomerName}</h3><p>{printBill.CustomerMobile} · {printBill.CustomerAddress}</p>
+        <table><thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>
+          {printBill.Treatments?.map((row, index) => <tr key={`pt-${index}`}><td>{row.TreatmentName}</td><td>1</td><td>{formatINR(row.Price)}</td><td>{formatINR(row.Price)}</td></tr>)}
+          {printBill.Items?.map((row, index) => <tr key={`pi-${index}`}><td>{row.ItemName}</td><td>{row.Quantity} {row.Unit}</td><td>{formatINR(row.Rate)}</td><td>{formatINR(row.LineTotal)}</td></tr>)}
+        </tbody></table><p><strong>Payment mode:</strong> {printBill.PaymentMode}</p><h2>Total: {formatINR(printBill.NetAmount)}</h2>
+        <section className="bill-print-terms"><h3>Terms &amp; Conditions</h3><ol>{printBill.Terms?.map((term, index) => <li key={term.TermId || term.TermText || index}>{typeof term === 'string' ? term : term.TermText}</li>)}</ol></section>
+      </section>}
     </div>
   );
 }
@@ -1507,16 +1771,17 @@ function calculateInclusiveTax(amount, taxRate) {
 }
 
 function PaymentsPage() {
-  const { hasAccess } = useAuth();
   const [payments, setPayments] = useState([]);
-  const [form, setForm] = useState(emptyPayment);
+  const [error, setError] = useState('');
 
   const loadPayments = async () => {
     try {
       const response = await api.get('/payments');
       setPayments(response.data);
-    } catch (error) {
-      console.error('Failed loading payments', error);
+      setError('');
+    } catch (requestError) {
+      console.error('Failed loading payments', requestError);
+      setError(requestError.response?.data?.message || 'Failed loading payment list.');
     }
   };
 
@@ -1524,56 +1789,33 @@ function PaymentsPage() {
     loadPayments();
   }, []);
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    await api.post('/payments', form);
-    setForm(emptyPayment);
-    loadPayments();
-  };
-
   return (
     <div>
-      <PageHeader title="Payment Management" subtitle="Track digital and cash payments" />
-      {hasAccess('payments', 'canAdd') && (
-        <div className="card form-card">
-          <h3>Record Payment</h3>
-          <form onSubmit={handleSubmit} className="grid-form">
-            <input placeholder="Bill ID" value={form.SaleBillId} onChange={(e) => setForm({ ...form, SaleBillId: e.target.value })} />
-            <input placeholder="Branch ID" value={form.BranchId} onChange={(e) => setForm({ ...form, BranchId: e.target.value })} />
-            <select value={form.PaymentMode} onChange={(e) => setForm({ ...form, PaymentMode: e.target.value })}>
-              <option value="Cash">Cash</option>
-              <option value="UPI">UPI</option>
-              <option value="Card">Card</option>
-              <option value="Bank Transfer">Bank Transfer</option>
-            </select>
-            <input type="number" placeholder="Amount" value={form.Amount} onChange={(e) => setForm({ ...form, Amount: Number(e.target.value) })} />
-            <input placeholder="Reference Number" value={form.ReferenceNumber} onChange={(e) => setForm({ ...form, ReferenceNumber: e.target.value })} />
-            <input type="date" value={form.PaymentDate} onChange={(e) => setForm({ ...form, PaymentDate: e.target.value })} />
-            <textarea placeholder="Notes" value={form.Notes} onChange={(e) => setForm({ ...form, Notes: e.target.value })} />
-            <button type="submit" className="primary-btn">Save Payment</button>
-          </form>
-        </div>
-      )}
+      <PageHeader title="Payment List" subtitle="Payments recorded against sale bills" />
+      {error && <div className="error-box" role="alert">{error}</div>}
 
       <div className="card list-card">
         <table>
           <thead>
             <tr>
-              <th>Mode</th>
-              <th>Branch</th>
-              <th>Amount</th>
-              <th>Reference</th>
+              <th>Bill No.</th><th>Bill Date</th><th>Client</th><th>Mode</th><th>Branch</th><th>Payment Date</th><th>Amount</th><th>Reference</th><th>Details</th>
             </tr>
           </thead>
           <tbody>
             {payments.map((payment) => (
               <tr key={payment.PaymentId || payment.ReferenceNumber}>
+                <td>{payment.BillNumber || '—'}</td>
+                <td>{String(payment.BillDate || '').slice(0, 10)}</td>
+                <td>{payment.CustomerName || '—'}</td>
                 <td>{payment.PaymentMode}</td>
                 <td>{payment.BranchName || 'Head Office'}</td>
-                <td>₹{Number(payment.Amount || 0).toLocaleString()}</td>
+                <td>{String(payment.PaymentDate || '').slice(0, 10)}</td>
+                <td>{formatINR(payment.Amount)}</td>
                 <td>{payment.ReferenceNumber}</td>
+                <td>{payment.Notes}</td>
               </tr>
             ))}
+            {!payments.length && <tr><td colSpan="9">No payments recorded yet.</td></tr>}
           </tbody>
         </table>
       </div>
