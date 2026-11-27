@@ -254,6 +254,20 @@ function normalizeContactNo(value) {
   return String(value || '').replace(/\D/g, '');
 }
 
+function getMockClientOutstanding(clientId) {
+  const clientBills = mockData.bills.filter((bill) => bill.ClientId === clientId && bill.Status !== 'VOID');
+  const getBillBalance = (bill) => {
+    const billId = bill.SaleBillId || bill.BillId;
+    const paid = mockData.payments
+      .filter((payment) => (payment.SaleBillId || payment.BillId) === billId)
+      .reduce((total, payment) => total + Number(payment.Amount || 0), 0);
+    return Math.max(0, Number(bill.NetAmount ?? bill.GrandTotal ?? 0) - paid);
+  };
+  const latestBill = clientBills[0];
+  if (latestBill && Number(latestBill.PreviousBalance || 0) > 0) return getBillBalance(latestBill);
+  return clientBills.reduce((total, bill) => total + getBillBalance(bill), 0);
+}
+
 function syncMockBillClient({ customerName, customerMobile, customerAddress, customerEmail }) {
   const contactNo = normalizeContactNo(customerMobile);
   if (!contactNo) throw new Error('A valid client contact number is required to save the client.');
@@ -575,11 +589,12 @@ function registerMasterRoutes(definition) {
 
     try {
       const request = (await connectDatabase()).request();
+      request.input('Id', sql.UniqueIdentifier, randomUUID());
       definition.fields.forEach((field) => request.input(field.name, field.type, values[field.name]));
       const result = await request.query(`
-        INSERT INTO dbo.[${definition.table}] (${columns})
+        INSERT INTO dbo.[${definition.table}] ([${definition.idColumn}], ${columns}, IsActive, CreatedAt, ModifiedAt)
         OUTPUT inserted.*
-        VALUES (${parameters})
+        VALUES (@Id, ${parameters}, 1, SYSUTCDATETIME(), SYSUTCDATETIME())
       `);
       return res.status(201).json(result.recordset[0]);
     } catch (databaseError) {
@@ -618,6 +633,35 @@ function registerMasterRoutes(definition) {
       return res.json(result.recordset[0]);
     } catch (databaseError) {
       return sendMasterDatabaseError(databaseError, res, 'update', definition.resource);
+    }
+  });
+
+  app.patch(`${route}/:id/activate`, authRequired, async (req, res) => {
+    if (!canAccess(req, definition.module, 'canEdit')) {
+      return res.status(403).json({ message: 'Reactivation not allowed.' });
+    }
+    if (useMockData) {
+      const record = mockData[definition.collection].find((item) => item[definition.idColumn] === req.params.id);
+      if (!record) return res.status(404).json({ message: `${definition.resource} record not found.` });
+      record.IsActive = true;
+      return res.json(record);
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid record ID.' });
+    }
+    try {
+      const result = await (await connectDatabase()).request()
+        .input('Id', sql.UniqueIdentifier, req.params.id)
+        .query(`
+          UPDATE dbo.[${definition.table}]
+          SET IsActive = 1, ModifiedAt = SYSUTCDATETIME()
+          OUTPUT inserted.*
+          WHERE [${definition.idColumn}] = @Id AND IsActive = 0
+        `);
+      if (!result.recordset.length) return res.status(404).json({ message: `${definition.resource} record not found.` });
+      return res.json(result.recordset[0]);
+    } catch (databaseError) {
+      return sendMasterDatabaseError(databaseError, res, 'reactivate', definition.resource);
     }
   });
 
@@ -669,11 +713,14 @@ app.get('/api/clients/lookup', authRequired, async (req, res) => {
     const client = mockData.clients.find((item) => (
       item.IsActive !== false && normalizeContactNo(item.ContactNo) === contactNoDigits
     ));
-    return res.json(client ? {
+    if (!client) return res.json(null);
+    const previousBalance = getMockClientOutstanding(client.ClientId);
+    return res.json({
       ClientName: client.ClientName,
       Address: client.Address,
       Email: client.Email || '',
-    } : null);
+      PreviousBalance: Math.round((previousBalance + Number.EPSILON) * 100) / 100,
+    });
   }
 
   try {
@@ -681,12 +728,34 @@ app.get('/api/clients/lookup', authRequired, async (req, res) => {
       .input('ContactNo', sql.NVarChar(30), contactNo)
       .input('ContactNoDigits', sql.NVarChar(30), contactNoDigits)
       .query(`
-        SELECT TOP (1) ClientName, Address, Email
-        FROM dbo.Clients
-        WHERE IsActive = 1
-          AND (ContactNo = @ContactNo
-            OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ContactNo)), N' ', N''), N'-', N''), N'+', N''), N'(', N''), N')', N''), N'.', N''), N'/', N'') = @ContactNoDigits)
-        ORDER BY CASE WHEN ContactNo = @ContactNo THEN 0 ELSE 1 END, CreatedAt DESC, ClientName
+        DECLARE @PaymentBillColumn sysname = CASE
+          WHEN COL_LENGTH(N'dbo.Payments', N'BillId') IS NOT NULL THEN N'BillId'
+          WHEN COL_LENGTH(N'dbo.Payments', N'SaleBillId') IS NOT NULL THEN N'SaleBillId'
+        END;
+        IF @PaymentBillColumn IS NULL THROW 51002, 'Payments table is missing a bill ID column.', 1;
+        DECLARE @LookupSql nvarchar(max) = N'
+          SELECT TOP (1) c.ClientName, c.Address, c.Email,
+            COALESCE((
+              SELECT CASE WHEN MAX(CASE WHEN balance.RowNumber = 1 AND balance.PreviousBalance > 0 THEN 1 ELSE 0 END) = 1
+                THEN MAX(CASE WHEN balance.RowNumber = 1 THEN CASE WHEN balance.AmountDue > 0 THEN balance.AmountDue ELSE 0 END END)
+                ELSE SUM(CASE WHEN balance.AmountDue > 0 THEN balance.AmountDue ELSE 0 END) END
+              FROM (
+                SELECT sb.PreviousBalance,
+                  sb.GrandTotal - COALESCE((SELECT SUM(p.Amount) FROM dbo.Payments p WHERE p.' + QUOTENAME(@PaymentBillColumn) + N' = sb.BillId), 0) AS AmountDue,
+                  ROW_NUMBER() OVER (ORDER BY sb.CreatedAt DESC, sb.BillDate DESC) AS RowNumber
+                FROM dbo.SaleBills sb
+                WHERE sb.Status <> N''VOID''
+                  AND REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(sb.CustomerMobile)), N'' '', N''''), N''-'', N''''), N''+'', N''''), N''('', N''''), N'')'', N''''), N''.'', N''''), N''/'', N'''') = @ContactNoDigits
+              ) balance
+            ), 0) AS PreviousBalance
+          FROM dbo.Clients c
+          WHERE c.IsActive = 1
+            AND (c.ContactNo = @ContactNo
+              OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(c.ContactNo)), N'' '', N''''), N''-'', N''''), N''+'', N''''), N''('', N''''), N'')'', N''''), N''.'', N''''), N''/'', N'''') = @ContactNoDigits)
+          ORDER BY CASE WHEN c.ContactNo = @ContactNo THEN 0 ELSE 1 END, c.CreatedAt DESC, c.ClientName';
+        EXEC sys.sp_executesql @LookupSql,
+          N'@ContactNo nvarchar(30), @ContactNoDigits nvarchar(30)',
+          @ContactNo = @ContactNo, @ContactNoDigits = @ContactNoDigits;
       `);
     return res.json(result.recordset[0] || null);
   } catch (error) {
@@ -734,7 +803,11 @@ app.post('/api/auth/login', async (req, res) => {
       }
     } catch (error) {
       console.error('SQL login failed:', error.message);
-      return res.status(503).json({ message: 'Database unavailable. Check the server database configuration.' });
+      return res.status(503).json({
+        message: process.env.NODE_ENV === 'production'
+          ? 'Database unavailable. Check the server database configuration.'
+          : `Database unavailable: ${error.code || error.message}`,
+      });
     }
   }
 
@@ -1158,6 +1231,33 @@ app.delete('/api/branches/:id', authRequired, async (req, res) => {
   } catch (error) {
     console.error('Failed deactivating branch in SQL Server:', error.message);
     return res.status(500).json({ message: 'Could not deactivate branch.' });
+  }
+});
+
+app.patch('/api/branches/:id/activate', authRequired, async (req, res) => {
+  if (!isSuperAdmin(req) || !canAccess(req, 'branches', 'canEdit')) {
+    return res.status(403).json({ message: 'Branch reactivation not allowed.' });
+  }
+  if (useMockData) {
+    const branch = mockData.branches.find((item) => item.BranchId === req.params.id);
+    if (!branch) return res.status(404).json({ message: 'Branch not found.' });
+    branch.IsActive = true;
+    return res.json(branch);
+  }
+  try {
+    const result = await (await connectDatabase()).request()
+      .input('BranchId', sql.UniqueIdentifier, req.params.id)
+      .query(`
+        UPDATE dbo.Branches
+        SET IsActive = 1, ModifiedAt = SYSUTCDATETIME()
+        OUTPUT inserted.BranchId
+        WHERE BranchId = @BranchId AND IsActive = 0
+      `);
+    if (!result.recordset.length) return res.status(404).json({ message: 'Branch not found.' });
+    return res.json({ message: 'Branch activated.' });
+  } catch (error) {
+    console.error('Failed reactivating branch in SQL Server:', error.message);
+    return res.status(500).json({ message: 'Could not activate branch.' });
   }
 });
 
@@ -2185,7 +2285,11 @@ app.get('/api/bills/:id', authRequired, async (req, res) => {
     if (!isSuperAdmin(req) && bill.BranchId !== req.user.branchId) return res.status(403).json({ message: 'Access denied.' });
     const branch = mockData.branches.find((item) => item.BranchId === bill.BranchId);
     const terms = bill.Terms?.length ? bill.Terms : branch?.Terms || [];
-    return res.json({ ...bill, Treatments: bill.Treatments || [], Items: bill.Items || [], Terms: terms });
+    const payments = mockData.payments
+      .filter((payment) => (payment.SaleBillId || payment.BillId) === billId)
+      .map(({ PaymentId, PaymentMode, Amount }) => ({ PaymentId, PaymentMode, Amount }));
+    const paidAmount = payments.reduce((sum, payment) => sum + Number(payment.Amount || 0), 0);
+    return res.json({ ...bill, PaidAmount: paidAmount, Treatments: bill.Treatments || [], Items: bill.Items || [], Payments: payments, Terms: terms });
   }
   try {
     const pool = await connectDatabase();
@@ -2196,7 +2300,7 @@ app.get('/api/bills/:id', authRequired, async (req, res) => {
       .query(`
         SELECT b.BillId AS SaleBillId, b.BranchId, br.BranchName, b.BillNumber,
                b.BillDate, b.CustomerName, b.CustomerMobile, b.CustomerAddress,
-               b.CustomerEmail, b.CustomerGSTNumber, b.NextServiceDate, b.PaymentMode,
+               b.CustomerEmail, b.CustomerGSTNumber, b.NextServiceDate, b.PreviousBalance, b.PaymentMode,
                b.Subtotal, b.DiscountTotal, b.TaxableAmount, b.CGST, b.SGST, b.IGST,
                b.GrandTotal AS NetAmount, b.Status
         FROM dbo.SaleBills b
@@ -2206,13 +2310,36 @@ app.get('/api/bills/:id', authRequired, async (req, res) => {
       `);
     const bill = result.recordset[0];
     if (!bill) return res.status(404).json({ message: 'Bill not found.' });
-    const [treatments, items, terms] = await Promise.all([
+    const [treatments, items, payments, terms] = await Promise.all([
       pool.request().input('BillId', sql.UniqueIdentifier, billId)
         .query('SELECT TreatmentId, TreatmentName, StaffName, TaxRate, GSTAmount, Price, IsPrinted FROM dbo.SaleBillTreatments WHERE BillId = @BillId ORDER BY SrNo'),
       pool.request().input('BillId', sql.UniqueIdentifier, billId)
         .query('SELECT ItemId, ItemName, Description AS Remarks, Quantity, Unit, Rate, TaxPercent AS TaxRate, TaxAmount, LineTotal FROM dbo.SaleBillItems WHERE BillId = @BillId ORDER BY SrNo'),
       pool.request().input('BillId', sql.UniqueIdentifier, billId)
-        .query('SELECT DisplayOrder, TermText FROM dbo.SaleBillTerms WHERE BillId = @BillId ORDER BY DisplayOrder'),
+        .query(`
+          DECLARE @BillColumn sysname = CASE
+            WHEN COL_LENGTH(N'dbo.Payments', N'BillId') IS NOT NULL THEN N'BillId'
+            WHEN COL_LENGTH(N'dbo.Payments', N'SaleBillId') IS NOT NULL THEN N'SaleBillId'
+          END;
+          IF @BillColumn IS NULL THROW 51002, 'Payments table is missing a bill ID column.', 1;
+          DECLARE @PaymentSql nvarchar(max) = N'SELECT PaymentId, PaymentMode, Amount FROM dbo.Payments WHERE '
+            + QUOTENAME(@BillColumn) + N' = @BillId ORDER BY PaymentDate, CreatedAt, PaymentId';
+          EXEC sys.sp_executesql @PaymentSql, N'@BillId uniqueidentifier', @BillId = @BillId;
+        `),
+      pool.request().input('BillId', sql.UniqueIdentifier, billId)
+        .query(`
+          IF OBJECT_ID(N'dbo.SaleBillTerms', N'U') IS NOT NULL
+          BEGIN
+            EXEC sys.sp_executesql
+              N'SELECT DisplayOrder, TermText FROM dbo.SaleBillTerms WHERE BillId = @BillId ORDER BY DisplayOrder',
+              N'@BillId uniqueidentifier', @BillId = @BillId;
+          END
+          ELSE
+          BEGIN
+            SELECT CAST(NULL AS int) AS DisplayOrder, CAST(NULL AS nvarchar(1000)) AS TermText
+            WHERE 1 = 0;
+          END
+        `),
     ]);
     let billTerms = terms.recordset;
     if (!billTerms.length) {
@@ -2221,10 +2348,15 @@ app.get('/api/bills/:id', authRequired, async (req, res) => {
         .query('SELECT DisplayOrder, TermText FROM dbo.BranchTermsConditions WHERE BranchId = @BranchId AND IsActive = 1 ORDER BY DisplayOrder, TermId');
       billTerms = branchTerms.recordset;
     }
-    return res.json({ ...bill, Treatments: treatments.recordset, Items: items.recordset, Terms: billTerms });
+    const paidAmount = payments.recordset.reduce((sum, payment) => sum + Number(payment.Amount || 0), 0);
+    return res.json({ ...bill, PaidAmount: paidAmount, Treatments: treatments.recordset, Items: items.recordset, Payments: payments.recordset, Terms: billTerms });
   } catch (error) {
-    console.error('Failed loading bill details:', error.message);
-    return res.status(503).json({ message: 'Could not load bill details.' });
+    console.error('Failed loading bill details:', error);
+    return res.status(503).json({
+      message: process.env.NODE_ENV === 'production'
+        ? 'Could not load bill details.'
+        : `Could not load bill details: ${error.message}`,
+    });
   }
 });
 
@@ -2240,6 +2372,7 @@ app.put('/api/bills/:id', authRequired, async (req, res) => {
   const billDate = String(req.body?.BillDate || '').trim();
   const nextServiceDate = String(req.body?.NextServiceDate || '').trim();
   const paymentMode = String(req.body?.PaymentMode || '').trim();
+  const paymentInputs = Array.isArray(req.body?.Payments) ? req.body.Payments : [];
   const treatmentInputs = Array.isArray(req.body?.Treatments) ? req.body.Treatments.filter((row) => String(row?.TreatmentId || '').trim()) : [];
   const itemInputs = Array.isArray(req.body?.Items) ? req.body.Items.filter((row) => String(row?.ItemId || '').trim()) : [];
   const isGuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -2256,6 +2389,10 @@ app.put('/api/bills/:id', authRequired, async (req, res) => {
   if (customerName.length > 160 || customerMobile.length > 30 || customerAddress.length > 400
       || customerEmail.length > 254 || paymentMode.length > 30) {
     return res.status(400).json({ message: 'One or more bill fields exceed the allowed length.' });
+  }
+  if (paymentInputs.length > 3 || paymentInputs.some((row) => !['Cash', 'UPI', 'Online', 'Card', 'Bank Transfer'].includes(String(row?.PaymentMode || ''))
+      || !Number.isFinite(Number(row?.Amount)) || Number(row.Amount) <= 0)) {
+    return res.status(400).json({ message: 'Enter a valid amount for each payment method.' });
   }
   if (!treatmentInputs.length && !itemInputs.length) return res.status(400).json({ message: 'Add at least one treatment or row item to the bill.' });
   if (treatmentInputs.length > 100 || itemInputs.length > 100
@@ -2276,11 +2413,26 @@ app.put('/api/bills/:id', authRequired, async (req, res) => {
     const bill = mockData.bills.find((item) => (item.SaleBillId || item.BillId) === billId && item.Status !== 'VOID');
     if (!bill) return res.status(404).json({ message: 'Bill not found.' });
     if (!isSuperAdmin(req) && bill.BranchId !== req.user.branchId) return res.status(403).json({ message: 'Access denied.' });
-    const paid = mockData.payments.filter((payment) => payment.SaleBillId === billId).reduce((sum, payment) => sum + Number(payment.Amount || 0), 0);
     const treatments = treatmentInputs.map((row) => ({ ...row, TreatmentName: row.TreatmentName || mockData.treatments.find((item) => String(item.TreatmentId) === String(row.TreatmentId))?.TreatmentName || '', Price: Number(row.Price), GSTAmount: Number(row.GSTAmount) }));
     const items = itemInputs.map((row) => ({ ...row, ItemName: row.ItemName || mockData.items.find((item) => String(item.ItemId) === String(row.ItemId))?.ItemName || '', Quantity: Number(row.Quantity), Rate: Number(row.Rate), LineTotal: roundMoney(Number(row.Quantity) * Number(row.Rate)) }));
-    const total = roundMoney(treatments.reduce((sum, row) => sum + row.Price, 0) + items.reduce((sum, row) => sum + row.LineTotal, 0));
+    const total = roundMoney(treatments.reduce((sum, row) => sum + row.Price, 0)
+      + items.reduce((sum, row) => sum + row.LineTotal, 0) + Number(bill.PreviousBalance || 0));
+    const paid = paymentInputs.reduce((sum, row) => sum + Number(row.Amount), 0);
     if (total < paid) return res.status(409).json({ message: 'Bill total cannot be lower than payments already recorded.' });
+    for (let index = mockData.payments.length - 1; index >= 0; index -= 1) {
+      if ((mockData.payments[index].SaleBillId || mockData.payments[index].BillId) === billId) mockData.payments.splice(index, 1);
+    }
+    paymentInputs.forEach((payment, index) => mockData.payments.unshift({
+      PaymentId: `p${Date.now()}-${index}`,
+      SaleBillId: billId,
+      BillNumber: bill.BillNumber,
+      BranchId: bill.BranchId,
+      PaymentDate: billDate,
+      Amount: Number(payment.Amount),
+      PaymentMode: String(payment.PaymentMode),
+      ReferenceNumber: '',
+      Notes: 'Payment recorded with bill update',
+    }));
     const clientId = syncMockBillClient({ customerName, customerMobile, customerAddress, customerEmail });
     Object.assign(bill, { ClientId: clientId, CustomerName: customerName, CustomerMobile: customerMobile, CustomerAddress: customerAddress, CustomerEmail: customerEmail, BillDate: billDate, NextServiceDate: nextServiceDate, PaymentMode: paymentMode, Treatments: treatments, Items: items, NetAmount: total, GrandTotal: total });
     return res.json(bill);
@@ -2295,14 +2447,13 @@ app.put('/api/bills/:id', authRequired, async (req, res) => {
       .input('BillId', sql.UniqueIdentifier, billId)
       .input('IsSuperAdmin', sql.Bit, isSuperAdmin(req))
       .input('BranchId', sql.UniqueIdentifier, req.user.branchId || null)
-      .query(`SELECT BillId, BranchId, BillNumber FROM dbo.SaleBills WITH (UPDLOCK, ROWLOCK) WHERE BillId = @BillId AND Status <> N'VOID' AND (@IsSuperAdmin = 1 OR BranchId = @BranchId)`);
+      .query(`SELECT BillId, BranchId, BillNumber, PreviousBalance FROM dbo.SaleBills WITH (UPDLOCK, ROWLOCK) WHERE BillId = @BillId AND Status <> N'VOID' AND (@IsSuperAdmin = 1 OR BranchId = @BranchId)`);
     const existing = existingResult.recordset[0];
     if (!existing) {
       await transaction.rollback(); transactionStarted = false;
       return res.status(404).json({ message: 'Bill not found.' });
     }
-    const paidResult = await transaction.request().input('BillId', sql.UniqueIdentifier, billId)
-      .query('SELECT COALESCE(SUM(Amount), 0) AS PaidAmount FROM dbo.Payments WHERE BillId = @BillId');
+    const editedPaidTotal = paymentInputs.reduce((sum, row) => sum + Number(row.Amount), 0);
     const treatments = [];
     for (const row of treatmentInputs) {
       const selectedResult = await transaction.request().input('TreatmentId', sql.UniqueIdentifier, String(row.TreatmentId).trim())
@@ -2327,14 +2478,16 @@ app.put('/api/bills/:id', authRequired, async (req, res) => {
       const taxAmount = inclusiveTax(lineTotal, taxRate);
       items.push({ ItemId: selected.ItemId, ItemName: selected.ItemName, Unit: selected.Unit, Quantity: quantity, Remarks: String(row.Remarks || '').trim(), Rate: rate, TaxRate: taxRate, TaxAmount: taxAmount, LineTotal: lineTotal, Amount: roundMoney(lineTotal - taxAmount) });
     }
-    const gross = roundMoney(treatments.reduce((sum, row) => sum + row.Price, 0) + items.reduce((sum, row) => sum + row.LineTotal, 0));
+    const serviceGross = roundMoney(treatments.reduce((sum, row) => sum + row.Price, 0)
+      + items.reduce((sum, row) => sum + row.LineTotal, 0));
+    const gross = roundMoney(serviceGross + Number(existing.PreviousBalance || 0));
     const totalTax = roundMoney(treatments.reduce((sum, row) => sum + row.GSTAmount, 0) + items.reduce((sum, row) => sum + row.TaxAmount, 0));
-    if (gross < Number(paidResult.recordset[0].PaidAmount || 0)) {
+    if (gross < editedPaidTotal) {
       await transaction.rollback(); transactionStarted = false;
       return res.status(409).json({ message: 'Bill total cannot be lower than payments already recorded.' });
     }
     const clientId = await syncBillClient(transaction, { customerName, customerMobile, customerAddress, customerEmail });
-    const taxable = roundMoney(gross - totalTax);
+    const taxable = roundMoney(serviceGross - totalTax);
     const cgst = roundMoney(totalTax / 2);
     const sgst = roundMoney(totalTax - cgst);
     const result = await transaction.request()
@@ -2366,6 +2519,60 @@ app.put('/api/bills/:id', authRequired, async (req, res) => {
                inserted.GrandTotal AS NetAmount
         WHERE BillId = @BillId AND Status <> N'VOID'
       `);
+    await transaction.request().input('BillId', sql.UniqueIdentifier, billId)
+      .query(`
+        DECLARE @BillColumn sysname = CASE
+          WHEN COL_LENGTH(N'dbo.Payments', N'BillId') IS NOT NULL THEN N'BillId'
+          WHEN COL_LENGTH(N'dbo.Payments', N'SaleBillId') IS NOT NULL THEN N'SaleBillId'
+        END;
+        IF @BillColumn IS NULL THROW 51002, 'Payments table is missing a bill ID column.', 1;
+        DECLARE @DeleteSql nvarchar(max) = N'DELETE FROM dbo.Payments WHERE ' + QUOTENAME(@BillColumn) + N' = @BillId';
+        EXEC sys.sp_executesql @DeleteSql, N'@BillId uniqueidentifier', @BillId = @BillId;
+      `);
+    for (const payment of paymentInputs) {
+      await transaction.request()
+        .input('BillId', sql.UniqueIdentifier, billId)
+        .input('BranchId', sql.UniqueIdentifier, existing.BranchId)
+        .input('PaymentDate', sql.Date, new Date(`${billDate}T00:00:00Z`))
+        .input('Amount', sql.Decimal(18, 2), roundMoney(Number(payment.Amount)))
+        .input('PaymentMode', sql.NVarChar(30), String(payment.PaymentMode))
+        .input('ReferenceNumber', sql.NVarChar(100), '')
+        .input('PaymentNote', sql.NVarChar(250), 'Payment recorded with bill update')
+        .input('CreatedBy', sql.UniqueIdentifier, req.user.userId)
+        .query(`
+          DECLARE @BillColumn sysname = CASE
+            WHEN COL_LENGTH(N'dbo.Payments', N'BillId') IS NOT NULL THEN N'BillId'
+            WHEN COL_LENGTH(N'dbo.Payments', N'SaleBillId') IS NOT NULL THEN N'SaleBillId'
+          END;
+          DECLARE @NoteColumn sysname = CASE
+            WHEN COL_LENGTH(N'dbo.Payments', N'Remarks') IS NOT NULL THEN N'Remarks'
+            WHEN COL_LENGTH(N'dbo.Payments', N'Notes') IS NOT NULL THEN N'Notes'
+          END;
+          DECLARE @InsertSql nvarchar(max);
+          IF @BillColumn IS NULL OR @NoteColumn IS NULL
+            THROW 51002, 'Payments table is missing a bill ID or notes column.', 1;
+          SET @InsertSql = N'INSERT INTO dbo.Payments ('
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'PaymentId') IS NOT NULL THEN N'PaymentId, ' ELSE N'' END
+            + QUOTENAME(@BillColumn)
+            + N', BranchId, PaymentDate, Amount, PaymentMode, ReferenceNumber, '
+            + QUOTENAME(@NoteColumn)
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'CreatedBy') IS NOT NULL THEN N', CreatedBy' ELSE N'' END
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'CreatedAt') IS NOT NULL THEN N', CreatedAt' ELSE N'' END
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'ModifiedAt') IS NOT NULL THEN N', ModifiedAt' ELSE N'' END
+            + N') VALUES ('
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'PaymentId') IS NOT NULL THEN N'NEWID(), ' ELSE N'' END
+            + N'@BillId, @BranchId, @PaymentDate, @Amount, @PaymentMode, @ReferenceNumber, @PaymentNote'
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'CreatedBy') IS NOT NULL THEN N', @CreatedBy' ELSE N'' END
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'CreatedAt') IS NOT NULL THEN N', SYSUTCDATETIME()' ELSE N'' END
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'ModifiedAt') IS NOT NULL THEN N', SYSUTCDATETIME()' ELSE N'' END
+            + N')';
+          EXEC sys.sp_executesql @InsertSql,
+            N'@BillId uniqueidentifier, @BranchId uniqueidentifier, @PaymentDate date, @Amount decimal(18,2), @PaymentMode nvarchar(30), @ReferenceNumber nvarchar(100), @PaymentNote nvarchar(250), @CreatedBy uniqueidentifier',
+            @BillId = @BillId, @BranchId = @BranchId, @PaymentDate = @PaymentDate,
+            @Amount = @Amount, @PaymentMode = @PaymentMode, @ReferenceNumber = @ReferenceNumber,
+            @PaymentNote = @PaymentNote, @CreatedBy = @CreatedBy;
+        `);
+    }
     await transaction.request().input('BillId', sql.UniqueIdentifier, billId).query('DELETE FROM dbo.SaleBillTreatments WHERE BillId = @BillId; DELETE FROM dbo.SaleBillItems WHERE BillId = @BillId;');
     for (let index = 0; index < treatments.length; index += 1) {
       const row = treatments[index];
@@ -2447,6 +2654,7 @@ app.post('/api/bills', authRequired, async (req, res) => {
   const nextServiceDate = String(req.body?.NextServiceDate || '').trim();
   const paymentMode = String(req.body?.PaymentMode || '').trim();
   const outerState = false;
+  const paymentInputs = Array.isArray(req.body?.Payments) ? req.body.Payments : [];
   const treatmentInputs = Array.isArray(req.body?.Treatments)
     ? req.body.Treatments.filter((row) => String(row?.TreatmentId || '').trim())
     : [];
@@ -2479,6 +2687,10 @@ app.post('/api/bills', authRequired, async (req, res) => {
   if (treatmentInputs.length + itemInputs.length === 0 || treatmentInputs.length > 100 || itemInputs.length > 100) {
     return res.status(400).json({ message: 'Add at least one treatment or row item to the sale.' });
   }
+  if (paymentInputs.length > 3 || paymentInputs.some((row) => !['Cash', 'UPI', 'Online', 'Card', 'Bank Transfer'].includes(String(row?.PaymentMode || ''))
+      || !Number.isFinite(Number(row?.Amount)) || Number(row.Amount) <= 0)) {
+    return res.status(400).json({ message: 'Enter a valid amount for each payment method.' });
+  }
   if (treatmentInputs.some((row) => !isValidId(String(row.TreatmentId || '').trim())
       || String(row.StaffName || '').length > 120
       || (row.Price !== undefined && (!Number.isFinite(Number(row.Price)) || Number(row.Price) < 0))
@@ -2497,6 +2709,14 @@ app.post('/api/bills', authRequired, async (req, res) => {
     if (!branch) {
       return res.status(400).json({ message: 'The selected branch does not exist or is inactive.' });
     }
+    const mockClient = mockData.clients.find((client) => normalizeContactNo(client.ContactNo) === normalizeContactNo(customerMobile));
+    const previousBalance = mockClient ? getMockClientOutstanding(mockClient.ClientId) : 0;
+    const mockBillTotal = treatmentInputs.reduce((sum, row) => sum + Number(row.Price || 0), 0)
+      + itemInputs.reduce((sum, row) => sum + Number(row.Rate || 0) * Number(row.Quantity || 0), 0);
+    const mockTotalWithBalance = Math.round((mockBillTotal + previousBalance + Number.EPSILON) * 100) / 100;
+    if (paymentInputs.reduce((sum, row) => sum + Number(row.Amount), 0) > mockTotalWithBalance + 0.01) {
+      return res.status(400).json({ message: 'Payment amounts cannot exceed the bill total.' });
+    }
     const clientId = syncMockBillClient({ customerName, customerMobile, customerAddress, customerEmail });
     const item = {
       ...req.body,
@@ -2509,10 +2729,23 @@ app.post('/api/bills', authRequired, async (req, res) => {
       OuterState: false,
       BranchName: branch.BranchName,
       ClientId: clientId,
-      NetAmount: 0,
+      PreviousBalance: previousBalance,
+      NetAmount: mockTotalWithBalance,
+      GrandTotal: mockTotalWithBalance,
       BillDate: billDate,
     };
     mockData.bills.unshift(item);
+    paymentInputs.forEach((payment, index) => mockData.payments.unshift({
+      PaymentId: `p${Date.now()}-${index}`,
+      SaleBillId: item.SaleBillId,
+      BillNumber: item.BillNumber,
+      BranchId: branchId,
+      PaymentDate: billDate,
+      Amount: Number(payment.Amount),
+      PaymentMode: String(payment.PaymentMode),
+      ReferenceNumber: '',
+      Notes: 'Payment collected with bill',
+    }));
     return res.status(201).json(item);
   }
 
@@ -2619,6 +2852,36 @@ app.post('/api/bills', authRequired, async (req, res) => {
     const sgst = outerState ? 0 : roundMoney(totalTax - cgst);
     const igst = outerState ? totalTax : 0;
     const clientId = await syncBillClient(transaction, { customerName, customerMobile, customerAddress, customerEmail });
+    const previousBalanceResult = await transaction.request()
+      .input('ContactNoDigits', sql.NVarChar(30), normalizeContactNo(customerMobile))
+      .query(`
+        DECLARE @PaymentBillColumn sysname = CASE
+          WHEN COL_LENGTH(N'dbo.Payments', N'BillId') IS NOT NULL THEN N'BillId'
+          WHEN COL_LENGTH(N'dbo.Payments', N'SaleBillId') IS NOT NULL THEN N'SaleBillId'
+        END;
+        IF @PaymentBillColumn IS NULL THROW 51002, 'Payments table is missing a bill ID column.', 1;
+        DECLARE @BalanceSql nvarchar(max) = N'
+          SELECT CASE WHEN MAX(CASE WHEN balance.RowNumber = 1 AND balance.PreviousBalance > 0 THEN 1 ELSE 0 END) = 1
+            THEN MAX(CASE WHEN balance.RowNumber = 1 THEN CASE WHEN balance.AmountDue > 0 THEN balance.AmountDue ELSE 0 END END)
+            ELSE SUM(CASE WHEN balance.AmountDue > 0 THEN balance.AmountDue ELSE 0 END) END AS PreviousBalance
+          FROM (
+            SELECT sb.PreviousBalance,
+              sb.GrandTotal - COALESCE((SELECT SUM(p.Amount) FROM dbo.Payments p WHERE p.' + QUOTENAME(@PaymentBillColumn) + N' = sb.BillId), 0) AS AmountDue,
+              ROW_NUMBER() OVER (ORDER BY sb.CreatedAt DESC, sb.BillDate DESC) AS RowNumber
+            FROM dbo.SaleBills sb
+            WHERE sb.Status <> N''VOID''
+              AND REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(sb.CustomerMobile)), N'' '', N''''), N''-'', N''''), N''+'', N''''), N''('', N''''), N'')'', N''''), N''.'', N''''), N''/'', N'''') = @ContactNoDigits
+          ) balance';
+        EXEC sys.sp_executesql @BalanceSql,
+          N'@ContactNoDigits nvarchar(30)', @ContactNoDigits = @ContactNoDigits;
+      `);
+    const previousBalance = roundMoney(Number(previousBalanceResult.recordset[0]?.PreviousBalance || 0));
+    const totalWithBalance = roundMoney(totalGross + previousBalance);
+    if (paymentInputs.reduce((sum, row) => sum + Number(row.Amount), 0) > totalWithBalance + 0.01) {
+      await transaction.rollback();
+      transactionStarted = false;
+      return res.status(400).json({ message: 'Payment amounts cannot exceed the bill total.' });
+    }
     const billNumberPrefix = getBillNumberPrefix(branch.BranchCode, billDate);
     const lockResult = await transaction.request()
       .input('LockResource', sql.NVarChar(255), `SaleBillNumber:${billNumberPrefix}`)
@@ -2662,22 +2925,68 @@ app.post('/api/bills', authRequired, async (req, res) => {
       .input('CGST', sql.Decimal(18, 2), cgst)
       .input('SGST', sql.Decimal(18, 2), sgst)
       .input('IGST', sql.Decimal(18, 2), igst)
-      .input('GrandTotal', sql.Decimal(18, 2), totalGross)
+      .input('GrandTotal', sql.Decimal(18, 2), totalWithBalance)
+      .input('PreviousBalance', sql.Decimal(18, 2), previousBalance)
       .input('CreatedBy', sql.UniqueIdentifier, req.user.userId)
       .query(`
         INSERT INTO dbo.SaleBills
           (BranchId, BillNumber, BillDate, CustomerName, CustomerMobile, CustomerAddress,
            CustomerGSTNumber, CustomerEmail, NextServiceDate, OuterState, PaymentMode,
-           Subtotal, DiscountTotal, TaxableAmount, CGST, SGST, IGST, GrandTotal,
+           Subtotal, DiscountTotal, TaxableAmount, CGST, SGST, IGST, GrandTotal, PreviousBalance,
            BillId, Status, CreatedBy, CreatedAt, ModifiedAt)
         OUTPUT inserted.BillId
         VALUES
           (@BranchId, @BillNumber, @BillDate, @CustomerName, @CustomerMobile, @CustomerAddress,
            @CustomerGSTNumber, @CustomerEmail, @NextServiceDate, @OuterState, @PaymentMode,
-           @Subtotal, @DiscountTotal, @TaxableAmount, @CGST, @SGST, @IGST, @GrandTotal,
+           @Subtotal, @DiscountTotal, @TaxableAmount, @CGST, @SGST, @IGST, @GrandTotal, @PreviousBalance,
            NEWID(), N'PENDING', @CreatedBy, SYSUTCDATETIME(), SYSUTCDATETIME())
       `);
     const billId = billResult.recordset[0].BillId;
+
+    for (const payment of paymentInputs) {
+      await transaction.request()
+        .input('BillId', sql.UniqueIdentifier, billId)
+        .input('BranchId', sql.UniqueIdentifier, branchId)
+        .input('PaymentDate', sql.Date, new Date(`${billDate}T00:00:00Z`))
+        .input('Amount', sql.Decimal(18, 2), roundMoney(Number(payment.Amount)))
+        .input('PaymentMode', sql.NVarChar(30), String(payment.PaymentMode))
+        .input('ReferenceNumber', sql.NVarChar(100), '')
+        .input('PaymentNote', sql.NVarChar(250), 'Payment collected with bill')
+        .input('CreatedBy', sql.UniqueIdentifier, req.user.userId)
+        .query(`
+          DECLARE @BillColumn sysname = CASE
+            WHEN COL_LENGTH(N'dbo.Payments', N'BillId') IS NOT NULL THEN N'BillId'
+            WHEN COL_LENGTH(N'dbo.Payments', N'SaleBillId') IS NOT NULL THEN N'SaleBillId'
+          END;
+          DECLARE @NoteColumn sysname = CASE
+            WHEN COL_LENGTH(N'dbo.Payments', N'Remarks') IS NOT NULL THEN N'Remarks'
+            WHEN COL_LENGTH(N'dbo.Payments', N'Notes') IS NOT NULL THEN N'Notes'
+          END;
+          DECLARE @InsertSql nvarchar(max);
+          IF @BillColumn IS NULL OR @NoteColumn IS NULL
+            THROW 51002, 'Payments table is missing a bill ID or notes column.', 1;
+          SET @InsertSql = N'INSERT INTO dbo.Payments ('
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'PaymentId') IS NOT NULL THEN N'PaymentId, ' ELSE N'' END
+            + QUOTENAME(@BillColumn)
+            + N', BranchId, PaymentDate, Amount, PaymentMode, ReferenceNumber, '
+            + QUOTENAME(@NoteColumn)
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'CreatedBy') IS NOT NULL THEN N', CreatedBy' ELSE N'' END
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'CreatedAt') IS NOT NULL THEN N', CreatedAt' ELSE N'' END
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'ModifiedAt') IS NOT NULL THEN N', ModifiedAt' ELSE N'' END
+            + N') VALUES ('
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'PaymentId') IS NOT NULL THEN N'NEWID(), ' ELSE N'' END
+            + N'@BillId, @BranchId, @PaymentDate, @Amount, @PaymentMode, @ReferenceNumber, @PaymentNote'
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'CreatedBy') IS NOT NULL THEN N', @CreatedBy' ELSE N'' END
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'CreatedAt') IS NOT NULL THEN N', SYSUTCDATETIME()' ELSE N'' END
+            + CASE WHEN COL_LENGTH(N'dbo.Payments', N'ModifiedAt') IS NOT NULL THEN N', SYSUTCDATETIME()' ELSE N'' END
+            + N')';
+          EXEC sys.sp_executesql @InsertSql,
+            N'@BillId uniqueidentifier, @BranchId uniqueidentifier, @PaymentDate date, @Amount decimal(18,2), @PaymentMode nvarchar(30), @ReferenceNumber nvarchar(100), @PaymentNote nvarchar(250), @CreatedBy uniqueidentifier',
+            @BillId = @BillId, @BranchId = @BranchId, @PaymentDate = @PaymentDate,
+            @Amount = @Amount, @PaymentMode = @PaymentMode, @ReferenceNumber = @ReferenceNumber,
+            @PaymentNote = @PaymentNote, @CreatedBy = @CreatedBy;
+        `);
+    }
 
     for (let index = 0; index < treatments.length; index += 1) {
       const row = treatments[index];
@@ -2744,7 +3053,8 @@ app.post('/api/bills', authRequired, async (req, res) => {
       CustomerName: customerName,
       CustomerMobile: customerMobile,
       BillDate: billDate,
-      NetAmount: totalGross,
+      PreviousBalance: previousBalance,
+      NetAmount: totalWithBalance,
       PaymentMode: paymentMode,
     });
   } catch (error) {
@@ -2762,7 +3072,11 @@ app.post('/api/bills', authRequired, async (req, res) => {
       return res.status(400).json({ message: 'A selected branch, treatment, item, or user is no longer available.' });
     }
     console.error('Failed creating sale bill in SQL Server:', error.message);
-    return res.status(500).json({ message: 'Could not save sale bill.' });
+    return res.status(500).json({
+      message: process.env.NODE_ENV === 'production'
+        ? 'Could not save sale bill.'
+        : `Could not save sale bill: ${error.message}`,
+    });
   }
 });
 
@@ -2921,12 +3235,24 @@ app.get('/api/reports', authRequired, async (req, res) => {
   if (!canAccess(req, 'reports', 'canView')) {
     return res.status(403).json({ message: 'Access denied.' });
   }
+  const fromDate = String(req.query?.fromDate || '').trim();
+  const toDate = String(req.query?.toDate || '').trim();
+  if ((fromDate && !isValidBillDate(fromDate)) || (toDate && !isValidBillDate(toDate))) {
+    return res.status(400).json({ message: 'Enter valid report start and end dates.' });
+  }
+  if (fromDate && toDate && fromDate > toDate) {
+    return res.status(400).json({ message: 'Report start date must be on or before its end date.' });
+  }
   if (useMockData) {
     const scopedBranches = mockData.branches.filter((branch) => (
       branch.IsActive && (isSuperAdmin(req) || branch.BranchId === req.user.branchId)
     ));
-    const scopedBills = filterBranchRecords(req, mockData.bills, 'BillDate');
-    const scopedPayments = filterBranchRecords(req, mockData.payments, 'PaymentDate');
+    const scopedBills = filterBranchRecords(req, mockData.bills, 'BillDate')
+      .filter((bill) => (!fromDate || String(bill.BillDate).slice(0, 10) >= fromDate)
+        && (!toDate || String(bill.BillDate).slice(0, 10) <= toDate));
+    const scopedPayments = filterBranchRecords(req, mockData.payments, 'PaymentDate')
+      .filter((payment) => (!fromDate || String(payment.PaymentDate).slice(0, 10) >= fromDate)
+        && (!toDate || String(payment.PaymentDate).slice(0, 10) <= toDate));
     const branchSummary = scopedBranches.map((branch) => ({
       BranchName: branch.BranchName,
       TotalBills: scopedBills.filter((bill) => bill.BranchId === branch.BranchId).length,
@@ -2953,7 +3279,9 @@ app.get('/api/reports', authRequired, async (req, res) => {
       .input('BranchId', sql.UniqueIdentifier, req.user.branchId || null)
       .input('CurrentMonthOnly', sql.Bit, isCurrentMonthUser(req))
       .input('MonthStart', sql.Date, monthStart)
-      .input('NextMonthStart', sql.Date, nextMonthStart);
+      .input('NextMonthStart', sql.Date, nextMonthStart)
+      .input('FromDate', sql.Date, fromDate || null)
+      .input('ToDate', sql.Date, toDate || null);
     const branchResult = await addReportScope(pool.request()).query(`
       SELECT br.BranchName,
              COUNT(sb.BillId) AS TotalBills,
@@ -2962,6 +3290,8 @@ app.get('/api/reports', authRequired, async (req, res) => {
       LEFT JOIN dbo.SaleBills sb
         ON sb.BranchId = br.BranchId
        AND (@CurrentMonthOnly = 0 OR (sb.BillDate >= @MonthStart AND sb.BillDate < @NextMonthStart))
+       AND (@FromDate IS NULL OR sb.BillDate >= @FromDate)
+       AND (@ToDate IS NULL OR sb.BillDate < DATEADD(DAY, 1, @ToDate))
       WHERE br.IsActive = 1
         AND (@IsSuperAdmin = 1 OR br.BranchId = @BranchId)
       GROUP BY br.BranchName
@@ -2972,6 +3302,8 @@ app.get('/api/reports', authRequired, async (req, res) => {
       FROM dbo.Payments
       WHERE (@IsSuperAdmin = 1 OR BranchId = @BranchId)
         AND (@CurrentMonthOnly = 0 OR (PaymentDate >= @MonthStart AND PaymentDate < @NextMonthStart))
+        AND (@FromDate IS NULL OR PaymentDate >= @FromDate)
+        AND (@ToDate IS NULL OR PaymentDate < DATEADD(DAY, 1, @ToDate))
       GROUP BY PaymentMode
       ORDER BY PaymentMode
     `);
@@ -2980,6 +3312,8 @@ app.get('/api/reports', authRequired, async (req, res) => {
       FROM dbo.SaleBills
       WHERE (@IsSuperAdmin = 1 OR BranchId = @BranchId)
         AND (@CurrentMonthOnly = 0 OR (BillDate >= @MonthStart AND BillDate < @NextMonthStart))
+        AND (@FromDate IS NULL OR BillDate >= @FromDate)
+        AND (@ToDate IS NULL OR BillDate < DATEADD(DAY, 1, @ToDate))
     `);
     return res.json({
       branchSummary: branchResult.recordset,

@@ -148,6 +148,7 @@ BEGIN
         DiscountAmount decimal(18,2) NOT NULL CONSTRAINT DF_SaleBills_DiscountAmount DEFAULT 0,
         GSTAmount decimal(18,2) NOT NULL CONSTRAINT DF_SaleBills_GSTAmount DEFAULT 0,
         NetAmount decimal(18,2) NOT NULL CONSTRAINT DF_SaleBills_NetAmount DEFAULT 0,
+        PreviousBalance decimal(18,2) NOT NULL CONSTRAINT DF_SaleBills_PreviousBalance DEFAULT 0,
         Notes nvarchar(500) NOT NULL CONSTRAINT DF_SaleBills_Notes DEFAULT N'',
         CreatedAt datetime2(0) NOT NULL CONSTRAINT DF_SaleBills_CreatedAt DEFAULT SYSUTCDATETIME(),
         ModifiedAt datetime2(0) NOT NULL CONSTRAINT DF_SaleBills_ModifiedAt DEFAULT SYSUTCDATETIME(),

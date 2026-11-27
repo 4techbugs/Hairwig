@@ -3,7 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes, Link, NavLink, useLocation, use
 import axios from 'axios';
 import './App.css';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5101/api';
 
 const api = axios.create({ baseURL: API_BASE });
 api.interceptors.request.use((request) => {
@@ -15,6 +15,18 @@ api.interceptors.request.use((request) => {
   }
   return request;
 });
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401 && window.location.pathname !== '/login') {
+      localStorage.removeItem('hairwig_token');
+      localStorage.removeItem('hairwig_user');
+      localStorage.removeItem('hairwig_permissions');
+      window.location.assign('/login');
+    }
+    return Promise.reject(error);
+  },
+);
 
 const emptyBranch = {
   BranchCode: '',
@@ -440,6 +452,16 @@ function BranchesPage() {
     }
   };
 
+  const handleReactivate = async (id) => {
+    setError('');
+    try {
+      await api.patch(`/branches/${id}/activate`);
+      await loadBranches();
+    } catch (requestError) {
+      setError(requestError.response?.data?.message || 'Failed to activate branch.');
+    }
+  };
+
   const handleEdit = (branch) => {
     setEditingBranchId(branch.BranchId);
     setForm({
@@ -563,6 +585,7 @@ function BranchesPage() {
                 </td>
                 <td>{branch.IsActive ? 'Active' : 'Inactive'}</td>
                 <td>
+                  {!branch.IsActive && canEdit && <button className="table-btn" type="button" onClick={() => handleReactivate(branch.BranchId)}>Activate</button>}
                   {branch.IsActive && canEdit && <button className="table-btn" type="button" onClick={() => handleEdit(branch)}>Edit</button>}
                   {branch.IsActive && canDelete && <button className="danger-btn" type="button" onClick={() => handleDelete(branch.BranchId)}>Delete</button>}
                 </td>
@@ -600,7 +623,7 @@ function BranchesPage() {
         <h1>HairWigHouse</h1><h2>Sale Bill {printBill.BillNumber}</h2><p>{printBill.BranchName} · {String(printBill.BillDate || '').slice(0, 10)}</p>
         <h3>{printBill.CustomerName}</h3><p>{printBill.CustomerMobile} · {printBill.CustomerAddress}</p>
         <table><thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>
-          {printBill.Treatments?.map((row, index) => <tr key={`pt-${index}`}><td>{row.TreatmentName}</td><td>1</td><td>{formatINR(row.Price)}</td><td>{formatINR(row.Price)}</td></tr>)}
+          {printBill.Treatments?.filter((row) => row.IsPrinted).map((row, index) => <tr key={`pt-${index}`}><td>{row.TreatmentName}</td><td>1</td><td>{formatINR(row.Price)}</td><td>{formatINR(row.Price)}</td></tr>)}
           {printBill.Items?.map((row, index) => <tr key={`pi-${index}`}><td>{row.ItemName}</td><td>{row.Quantity} {row.Unit}</td><td>{formatINR(row.Rate)}</td><td>{formatINR(row.LineTotal)}</td></tr>)}
         </tbody></table><p><strong>Payment mode:</strong> {printBill.PaymentMode}</p><h2>Total: {formatINR(printBill.NetAmount)}</h2>
         <section className="bill-print-terms"><h3>Terms &amp; Conditions</h3><ol>{printBill.Terms?.map((term, index) => <li key={term.TermId || term.TermText || index}>{typeof term === 'string' ? term : term.TermText}</li>)}</ol></section>
@@ -831,6 +854,17 @@ function MasterPage({ config }) {
     }
   };
 
+  const handleReactivate = async (record) => {
+    if (!canEdit) return;
+    setError('');
+    try {
+      await api.patch(`${config.endpoint}/${record[config.idField]}/activate`);
+      await loadRecords();
+    } catch (requestError) {
+      setError(requestError.response?.data?.message || 'Failed to reactivate record.');
+    }
+  };
+
   return (
     <div>
       <PageHeader title={config.title} subtitle={config.subtitle} />
@@ -912,6 +946,7 @@ function MasterPage({ config }) {
                 <td>{record.IsActive ? 'Active' : 'Inactive'}</td>
                 {(canEdit || canDelete) && (
                   <td>
+                    {!record.IsActive && canEdit && <button type="button" className="table-btn" onClick={() => handleReactivate(record)}>Activate</button>}
                     {record.IsActive && canEdit && (
                       <button
                         type="button"
@@ -1152,10 +1187,12 @@ function BillsPage({ listOnly = false }) {
   const [form, setForm] = useState({ ...emptyBill, BranchId: auth.user?.BranchId || '' });
   const [treatmentRows, setTreatmentRows] = useState([{ TreatmentId: '', StaffName: '', TaxRate: 0, GSTAmount: 0, Price: 0, IsPrinted: false }]);
   const [itemRows, setItemRows] = useState([{ ItemId: '', Quantity: 1, Rate: '', Remarks: '' }]);
+  const [paymentRows, setPaymentRows] = useState([{ PaymentMode: 'Cash', Amount: '' }]);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [billListError, setBillListError] = useState('');
   const [billFilters, setBillFilters] = useState({ fromDate: '', toDate: '', paymentMode: '' });
+  const [billColumnFilters, setBillColumnFilters] = useState({});
   const [viewingBill, setViewingBill] = useState(null);
   const [editingBill, setEditingBill] = useState(null);
   const [printBill, setPrintBill] = useState(null);
@@ -1163,6 +1200,7 @@ function BillsPage({ listOnly = false }) {
   const [billNumberPreview, setBillNumberPreview] = useState({ key: '', value: '', error: '' });
   const [billNumberPreviewRefresh, setBillNumberPreviewRefresh] = useState(0);
   const [clientLookupStatus, setClientLookupStatus] = useState({ type: '', message: '' });
+  const [previousBalance, setPreviousBalance] = useState(0);
   const autofilledClientRef = useRef(null);
 
   const loadBills = useCallback(async () => {
@@ -1176,6 +1214,24 @@ function BillsPage({ listOnly = false }) {
       setBillListError(requestError.response?.data?.message || 'Failed loading bills.');
     }
   }, [billFilters, listOnly]);
+
+  const visibleBills = useMemo(() => {
+    if (!listOnly) return bills;
+    const matches = (value, filter) => String(value ?? '').toLowerCase().includes(String(filter || '').trim().toLowerCase());
+    return bills.filter((bill) => {
+      const total = Number(bill.NetAmount ?? bill.GrandTotal ?? 0);
+      const paid = Number(bill.PaidAmount || 0);
+      return matches(bill.BillNumber, billColumnFilters.billNumber)
+        && matches(bill.CustomerName, billColumnFilters.client)
+        && matches(bill.CustomerMobile, billColumnFilters.mobile)
+        && matches(String(bill.BillDate || '').slice(0, 10), billColumnFilters.date)
+        && matches(bill.BranchName || 'Head Office', billColumnFilters.branch)
+        && matches(bill.PaymentDetails || bill.PaymentMode, billColumnFilters.payment)
+        && matches(total.toFixed(2), billColumnFilters.total)
+        && matches(paid.toFixed(2), billColumnFilters.paid)
+        && matches(Math.max(0, total - paid).toFixed(2), billColumnFilters.balance);
+    });
+  }, [billColumnFilters, bills, listOnly]);
 
   useEffect(() => {
     loadBills();
@@ -1262,7 +1318,7 @@ function BillsPage({ listOnly = false }) {
 
   useEffect(() => {
     const contactNo = form.CustomerMobile.trim();
-    if (!contactNo) return undefined;
+    if (!contactNo || editingBill) return undefined;
 
     let active = true;
     const timeoutId = setTimeout(async () => {
@@ -1271,11 +1327,13 @@ function BillsPage({ listOnly = false }) {
         const response = await api.get('/clients/lookup', { params: { contactNo } });
         if (!active) return;
         if (!response.data) {
+          setPreviousBalance(0);
           setClientLookupStatus({ type: 'not-found', message: 'Client is not in Client Master. You can still save this bill with the details entered here.' });
           return;
         }
 
         const client = response.data;
+        setPreviousBalance(Number(client.PreviousBalance || 0));
         setForm((current) => {
           if (current.CustomerMobile.trim() !== contactNo) return current;
           autofilledClientRef.current = {
@@ -1294,6 +1352,7 @@ function BillsPage({ listOnly = false }) {
         setClientLookupStatus({ type: 'found', message: 'Client details filled from Client Master.' });
       } catch (requestError) {
         if (!active) return;
+        setPreviousBalance(0);
         setClientLookupStatus({
           type: 'error',
           message: requestError.response?.data?.message || 'Could not look up client details.',
@@ -1305,11 +1364,12 @@ function BillsPage({ listOnly = false }) {
       active = false;
       clearTimeout(timeoutId);
     };
-  }, [form.CustomerMobile]);
+  }, [form.CustomerMobile, editingBill]);
 
   const handleClientContactChange = (contactNo) => {
     const previousClient = autofilledClientRef.current;
     autofilledClientRef.current = null;
+    if (!editingBill) setPreviousBalance(0);
     setClientLookupStatus({ type: '', message: '' });
     setForm((current) => ({
       ...current,
@@ -1342,7 +1402,9 @@ function BillsPage({ listOnly = false }) {
   }, 0);
   const grossTotal = treatmentTotal + itemTotal;
   const gstTotal = treatmentTax + itemTax;
-  const grandTotal = grossTotal;
+  const grandTotal = grossTotal + previousBalance;
+  const paidTotal = paymentRows.reduce((total, row) => total + Number(row.Amount || 0), 0);
+  const balanceDue = Math.max(0, grandTotal - paidTotal);
 
   const handleTreatmentChange = (index, treatmentId) => {
     const selected = treatments.find((treatment) => String(treatment.TreatmentId) === treatmentId);
@@ -1373,8 +1435,21 @@ function BillsPage({ listOnly = false }) {
     setError('');
     setSuccess('');
     setSaving(true);
+    const normalizedPayments = paymentRows
+      .map((row, index) => ({
+        PaymentMode: row.PaymentMode,
+        Amount: Number(row.Amount || (!editingBill && index === 0 && paymentRows.length === 1 ? grandTotal : 0)),
+      }))
+      .filter((row) => row.Amount > 0);
+    if (normalizedPayments.reduce((sum, row) => sum + row.Amount, 0) > grandTotal + 0.01) {
+      setError('Payment amounts cannot exceed the bill total.');
+      setSaving(false);
+      return;
+    }
     const payload = {
       ...form,
+      PaymentMode: normalizedPayments.length > 1 ? 'MIX' : (normalizedPayments[0]?.PaymentMode || form.PaymentMode || 'Cash'),
+      Payments: normalizedPayments,
       CustomerEmail: String(form.CustomerEmail || '').trim(),
       Treatments: treatmentRows.filter((row) => row.TreatmentId).map(({ TreatmentId, StaffName, IsPrinted, Price, GSTAmount }) => ({
         TreatmentId,
@@ -1404,6 +1479,8 @@ function BillsPage({ listOnly = false }) {
       setForm({ ...emptyBill, BranchId: form.BranchId });
       setTreatmentRows([{ TreatmentId: '', StaffName: '', TaxRate: 0, GSTAmount: 0, Price: 0, IsPrinted: false }]);
       setItemRows([{ ItemId: '', Quantity: 1, Rate: '', Remarks: '' }]);
+      setPaymentRows([{ PaymentMode: 'Cash', Amount: '' }]);
+      setPreviousBalance(0);
       await loadBills();
     } catch (requestError) {
       if (requestError.response?.status === 409) {
@@ -1416,6 +1493,7 @@ function BillsPage({ listOnly = false }) {
   };
 
   const populateBillForm = useCallback((bill) => {
+    const paidAmount = Number(bill.PaidAmount || 0);
     setForm({
       BranchId: bill.BranchId || '',
       CustomerName: bill.CustomerName || '',
@@ -1426,6 +1504,17 @@ function BillsPage({ listOnly = false }) {
       NextServiceDate: String(bill.NextServiceDate || '').slice(0, 10),
       PaymentMode: bill.PaymentMode || 'Cash',
     });
+    const loadedPayments = bill.Payments?.length
+      ? bill.Payments.map((payment) => ({
+        PaymentId: payment.PaymentId,
+        PaymentMode: payment.PaymentMode || 'Cash',
+        Amount: String(payment.Amount ?? ''),
+      }))
+      : paidAmount > 0
+        ? [{ PaymentMode: bill.PaymentMode === 'MIX' ? 'Cash' : (bill.PaymentMode || 'Cash'), Amount: String(paidAmount) }]
+        : [{ PaymentMode: bill.PaymentMode || 'Cash', Amount: '' }];
+    setPaymentRows(loadedPayments);
+    setPreviousBalance(Number(bill.PreviousBalance || 0));
     setTreatmentRows(bill.Treatments?.length
       ? bill.Treatments.map((row) => ({
         TreatmentId: String(row.TreatmentId),
@@ -1486,10 +1575,12 @@ function BillsPage({ listOnly = false }) {
 
   const cancelBillEdit = () => {
     setEditingBill(null);
+    setPreviousBalance(0);
     setError('');
     setForm({ ...emptyBill, BranchId: auth.user?.BranchId || branches[0]?.BranchId || '' });
     setTreatmentRows([{ TreatmentId: '', StaffName: '', TaxRate: 0, GSTAmount: 0, Price: 0, IsPrinted: false }]);
     setItemRows([{ ItemId: '', Quantity: 1, Rate: '', Remarks: '' }]);
+    setPaymentRows([{ PaymentMode: 'Cash', Amount: '' }]);
   };
 
   const deleteBill = async (bill) => {
@@ -1569,16 +1660,6 @@ function BillsPage({ listOnly = false }) {
                   <label>
                     <span>Date</span>
                     <input type="date" min="1900-01-01" value={form.BillDate} onChange={(event) => setForm({ ...form, BillDate: event.target.value })} required />
-                  </label>
-                  <label>
-                    <span>Payment Mode</span>
-                    <select value={form.PaymentMode} onChange={(event) => setForm({ ...form, PaymentMode: event.target.value })}>
-                      <option value="Cash">Cash</option>
-                      <option value="UPI">UPI</option>
-                      <option value="Card">Card</option>
-                      <option value="Bank Transfer">Bank Transfer</option>
-                      <option value="MIX">MIX</option>
-                    </select>
                   </label>
                   <label>
                     <span>Next Service Date</span>
@@ -1687,10 +1768,23 @@ function BillsPage({ listOnly = false }) {
 
             <aside className="card section-card sale-summary">
               <h3>Bill Summary</h3>
+              {previousBalance > 0 && <div><span>Previous balance</span><strong>{formatINR(previousBalance)}</strong></div>}
               <div><span>Treatments</span><strong>₹{treatmentTotal.toFixed(2)}</strong></div>
               <div><span>Row Items</span><strong>₹{itemTotal.toFixed(2)}</strong></div>
               <div><span>GST included</span><strong>₹{gstTotal.toFixed(2)}</strong></div>
               <div className="sale-grand-total"><span>Total Amount</span><strong>₹{grandTotal.toFixed(2)}</strong></div>
+              <div className="payment-breakdown">
+                <div className="sale-section-heading"><h3>Payment options</h3><button type="button" className="table-btn" disabled={paymentRows.length >= 3} onClick={() => setPaymentRows((rows) => [...rows, { PaymentMode: 'UPI', Amount: '' }])}>Add method</button></div>
+                {paymentRows.map((row, index) => <div className="payment-row" key={`payment-${index}`}>
+                  <select aria-label={`Payment method ${index + 1}`} value={row.PaymentMode} onChange={(event) => setPaymentRows((rows) => rows.map((item, rowIndex) => rowIndex === index ? { ...item, PaymentMode: event.target.value } : item))}>
+                    <option value="Cash">Cash</option><option value="UPI">UPI</option><option value="Online">Online</option><option value="Card">Card</option><option value="Bank Transfer">Bank Transfer</option>
+                  </select>
+                  <input aria-label={`Amount by ${row.PaymentMode}`} type="number" min="0" max={grandTotal} step="0.01" placeholder="Amount" value={row.Amount || (!editingBill && paymentRows.length === 1 && index === 0 ? grandTotal : '')} onChange={(event) => setPaymentRows((rows) => rows.map((item, rowIndex) => rowIndex === index ? { ...item, Amount: event.target.value } : item))} />
+                  {paymentRows.length > 1 && <button type="button" className="danger-btn" aria-label="Remove payment method" onClick={() => setPaymentRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>×</button>}
+                </div>)}
+                <div><span>Paid</span><strong>₹{(!editingBill && !paidTotal && paymentRows.length === 1 ? grandTotal : paidTotal).toFixed(2)}</strong></div>
+                <div><span>Balance due</span><strong>₹{Math.max(0, balanceDue - (!editingBill && paymentRows.length === 1 && !paymentRows[0].Amount ? grandTotal : 0)).toFixed(2)}</strong></div>
+              </div>
               <button type="submit" className="primary-btn" disabled={saving || !form.BranchId}>
                 {saving ? (editingBill ? 'Updating Bill...' : 'Saving Sale...') : (editingBill ? 'Update Bill' : 'Save Sale')}
               </button>
@@ -1700,8 +1794,8 @@ function BillsPage({ listOnly = false }) {
         </form>
       )}
 
-      <div className="card list-card">
-        <h3>{listOnly ? 'Filtered Bills' : 'Bills'}</h3>
+      <div className={`card list-card${listOnly ? ' bill-list-card' : ''}`}>
+        <div className="bill-list-heading"><div><h3>{listOnly ? 'Bill Register' : 'Bills'}</h3>{listOnly && <p>Search each column to narrow the bill list.</p>}</div>{listOnly && <span className="bill-count-pill">{visibleBills.length} bills</span>}</div>
         {listOnly && <div className="bill-filters">
           <label><span>From date</span><input type="date" value={billFilters.fromDate} onChange={(event) => setBillFilters({ ...billFilters, fromDate: event.target.value })} /></label>
           <label><span>To date</span><input type="date" value={billFilters.toDate} onChange={(event) => setBillFilters({ ...billFilters, toDate: event.target.value })} /></label>
@@ -1717,9 +1811,21 @@ function BillsPage({ listOnly = false }) {
             <tr>
               <th>Bill Number</th><th>Client</th><th>Mobile</th><th>Date</th><th>Branch</th><th>Payment details</th><th>Total</th><th>Paid</th><th>Balance</th><th>Actions</th>
             </tr>
+            {listOnly && <tr className="column-filter-row">
+              <th><input aria-label="Filter by bill number" placeholder="Bill no." value={billColumnFilters.billNumber || ''} onChange={(event) => setBillColumnFilters({ ...billColumnFilters, billNumber: event.target.value })} /></th>
+              <th><input aria-label="Filter by client" placeholder="Client" value={billColumnFilters.client || ''} onChange={(event) => setBillColumnFilters({ ...billColumnFilters, client: event.target.value })} /></th>
+              <th><input aria-label="Filter by mobile" placeholder="Mobile" value={billColumnFilters.mobile || ''} onChange={(event) => setBillColumnFilters({ ...billColumnFilters, mobile: event.target.value })} /></th>
+              <th><input aria-label="Filter by bill date" type="date" value={billColumnFilters.date || ''} onChange={(event) => setBillColumnFilters({ ...billColumnFilters, date: event.target.value })} /></th>
+              <th><input aria-label="Filter by branch" placeholder="Branch" value={billColumnFilters.branch || ''} onChange={(event) => setBillColumnFilters({ ...billColumnFilters, branch: event.target.value })} /></th>
+              <th><input aria-label="Filter by payment details" placeholder="Payment" value={billColumnFilters.payment || ''} onChange={(event) => setBillColumnFilters({ ...billColumnFilters, payment: event.target.value })} /></th>
+              <th><input aria-label="Filter by total" placeholder="Total" inputMode="decimal" value={billColumnFilters.total || ''} onChange={(event) => setBillColumnFilters({ ...billColumnFilters, total: event.target.value })} /></th>
+              <th><input aria-label="Filter by paid amount" placeholder="Paid" inputMode="decimal" value={billColumnFilters.paid || ''} onChange={(event) => setBillColumnFilters({ ...billColumnFilters, paid: event.target.value })} /></th>
+              <th><input aria-label="Filter by balance" placeholder="Balance" inputMode="decimal" value={billColumnFilters.balance || ''} onChange={(event) => setBillColumnFilters({ ...billColumnFilters, balance: event.target.value })} /></th>
+              <th><button type="button" className="table-btn" onClick={() => setBillColumnFilters({})}>Clear</button></th>
+            </tr>}
           </thead>
           <tbody>
-            {bills.map((bill) => (
+            {visibleBills.map((bill) => (
               <tr key={bill.SaleBillId || bill.BillNumber}>
                 <td>{bill.BillNumber}</td>
                 <td>{bill.CustomerName}</td>
@@ -1738,25 +1844,79 @@ function BillsPage({ listOnly = false }) {
                 </td>
               </tr>
             ))}
-            {!bills.length && <tr><td colSpan="10">No bills match these filters.</td></tr>}
+            {!visibleBills.length && <tr><td colSpan="10">No bills match these filters.</td></tr>}
           </tbody>
         </table>
         </div>
       </div>
       {viewingBill && <div className="modal-backdrop" role="presentation" onClick={() => setViewingBill(null)}>
-        <section className="card bill-modal" role="dialog" aria-modal="true" aria-labelledby="bill-view-title" onClick={(event) => event.stopPropagation()}>
-          <div className="sale-section-heading"><h3 id="bill-view-title">Bill {viewingBill.BillNumber}</h3><button type="button" className="table-btn" onClick={() => setViewingBill(null)}>Close</button></div>
-          <p>{viewingBill.CustomerName} · {viewingBill.CustomerMobile} · {String(viewingBill.BillDate || '').slice(0, 10)}</p><p>{viewingBill.CustomerAddress}</p>
-          <h4>Treatments</h4><table><thead><tr><th>Treatment</th><th>Staff</th><th>Price</th></tr></thead><tbody>{viewingBill.Treatments?.map((row, index) => <tr key={`${row.TreatmentId}-${index}`}><td>{row.TreatmentName}</td><td>{row.StaffName}</td><td>{formatINR(row.Price)}</td></tr>)}</tbody></table>
-          <h4>Items</h4><table><thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Amount</th></tr></thead><tbody>{viewingBill.Items?.map((row, index) => <tr key={`${row.ItemId}-${index}`}><td>{row.ItemName}</td><td>{row.Quantity}</td><td>{row.Unit}</td><td>{formatINR(row.LineTotal)}</td></tr>)}</tbody></table>
-          <p><strong>Mode:</strong> {viewingBill.PaymentMode} <strong>Total:</strong> {formatINR(viewingBill.NetAmount)}</p>
+        <section className="bill-view-modal" role="dialog" aria-modal="true" aria-labelledby="bill-view-title" onClick={(event) => event.stopPropagation()}>
+          {(() => {
+            const total = Number(viewingBill.NetAmount ?? viewingBill.GrandTotal ?? 0);
+            const paid = Number(viewingBill.PaidAmount || 0);
+            const balance = Math.max(0, total - paid);
+            const status = balance <= 0 ? 'Paid' : paid > 0 ? 'Partially paid' : 'Unpaid';
+            return <>
+              <header className="bill-view-header">
+                <div>
+                  <span className="bill-view-kicker">SALE BILL</span>
+                  <h2 id="bill-view-title">{viewingBill.BillNumber}</h2>
+                  <p>{viewingBill.BranchName || 'Branch'} <span>·</span> {String(viewingBill.BillDate || '').slice(0, 10)}</p>
+                </div>
+                <div className="bill-view-header-actions">
+                  <span className={`bill-status-pill ${status === 'Paid' ? 'is-paid' : status === 'Unpaid' ? 'is-unpaid' : 'is-partial'}`}>{status}</span>
+                  <button type="button" className="bill-view-close" aria-label="Close bill details" onClick={() => setViewingBill(null)}>×</button>
+                </div>
+              </header>
+              <div className="bill-view-content">
+                <div className="bill-view-stats">
+                  <div className="bill-view-stat"><span>Bill total</span><strong>{formatINR(total)}</strong></div>
+                  <div className="bill-view-stat"><span>Paid</span><strong>{formatINR(paid)}</strong></div>
+                  <div className="bill-view-stat bill-view-stat-balance"><span>Balance due</span><strong>{formatINR(balance)}</strong></div>
+                </div>
+
+                <section className="bill-view-section">
+                  <div className="bill-view-section-title"><span className="bill-view-section-icon">01</span><div><h3>Customer details</h3><p>Billing information</p></div></div>
+                  <div className="bill-view-customer-grid">
+                    <div><span>Customer</span><strong>{viewingBill.CustomerName || '—'}</strong></div>
+                    <div><span>Mobile</span><strong>{viewingBill.CustomerMobile || '—'}</strong></div>
+                    <div><span>Address</span><strong>{viewingBill.CustomerAddress || '—'}</strong></div>
+                    <div><span>Email</span><strong>{viewingBill.CustomerEmail || '—'}</strong></div>
+                  </div>
+                </section>
+
+                <section className="bill-view-section">
+                  <div className="bill-view-section-title"><span className="bill-view-section-icon">02</span><div><h3>Bill items</h3><p>{(viewingBill.Treatments?.length || 0) + (viewingBill.Items?.length || 0)} line items</p></div></div>
+                  <div className="bill-view-table-wrap">
+                    <table className="bill-view-table">
+                      <thead><tr><th>Description</th><th>Staff / Unit</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
+                      <tbody>
+                        {viewingBill.Treatments?.map((row, index) => <tr key={`vt-${row.TreatmentId}-${index}`}><td><strong>{row.TreatmentName}</strong><small>Treatment</small></td><td>{row.StaffName || '—'}</td><td>1</td><td>{formatINR(row.Price)}</td><td className="bill-view-amount">{formatINR(row.Price)}</td></tr>)}
+                        {viewingBill.Items?.map((row, index) => <tr key={`vi-${row.ItemId}-${index}`}><td><strong>{row.ItemName}</strong><small>Product</small></td><td>{row.Unit || '—'}</td><td>{row.Quantity}</td><td>{formatINR(row.Rate)}</td><td className="bill-view-amount">{formatINR(row.LineTotal ?? row.Amount)}</td></tr>)}
+                        {!viewingBill.Treatments?.length && !viewingBill.Items?.length && <tr><td colSpan="5" className="bill-view-empty">No line items found for this bill.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="bill-view-total-row"><span>Previous balance included</span><strong>{formatINR(viewingBill.PreviousBalance)}</strong></div>
+                  <div className="bill-view-total-row bill-view-grand-total"><span>Total bill amount</span><strong>{formatINR(total)}</strong></div>
+                </section>
+
+                <section className="bill-view-payment">
+                  <div><span className="bill-view-section-icon">03</span><div><h3>Payment summary</h3><p>Payment mode: <strong>{viewingBill.PaymentMode || '—'}</strong></p></div></div>
+                  <div className="bill-view-payment-amounts"><span>Paid <strong>{formatINR(paid)}</strong></span><span>Due <strong>{formatINR(balance)}</strong></span></div>
+                </section>
+                {viewingBill.Terms?.length > 0 && <section className="bill-view-terms"><h3>Terms &amp; conditions</h3><ol>{viewingBill.Terms.map((term, index) => <li key={term.TermId || term.TermText || index}>{typeof term === 'string' ? term : term.TermText}</li>)}</ol></section>}
+              </div>
+              <footer className="bill-view-footer"><span>Thank you for your business.</span><button type="button" className="primary-btn" onClick={() => setViewingBill(null)}>Done</button></footer>
+            </>;
+          })()}
         </section>
       </div>}
       {printBill && <section className="bill-print-sheet">
         <h1>HairWigHouse</h1><h2>Sale Bill {printBill.BillNumber}</h2><p>{printBill.BranchName} · {String(printBill.BillDate || '').slice(0, 10)}</p>
         <h3>{printBill.CustomerName}</h3><p>{printBill.CustomerMobile} · {printBill.CustomerAddress}</p>
         <table><thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>
-          {printBill.Treatments?.map((row, index) => <tr key={`pt-${index}`}><td>{row.TreatmentName}</td><td>1</td><td>{formatINR(row.Price)}</td><td>{formatINR(row.Price)}</td></tr>)}
+          {printBill.Treatments?.filter((row) => row.IsPrinted).map((row, index) => <tr key={`pt-${index}`}><td>{row.TreatmentName}</td><td>1</td><td>{formatINR(row.Price)}</td><td>{formatINR(row.Price)}</td></tr>)}
           {printBill.Items?.map((row, index) => <tr key={`pi-${index}`}><td>{row.ItemName}</td><td>{row.Quantity} {row.Unit}</td><td>{formatINR(row.Rate)}</td><td>{formatINR(row.LineTotal)}</td></tr>)}
         </tbody></table><p><strong>Payment mode:</strong> {printBill.PaymentMode}</p><h2>Total: {formatINR(printBill.NetAmount)}</h2>
         <section className="bill-print-terms"><h3>Terms &amp; Conditions</h3><ol>{printBill.Terms?.map((term, index) => <li key={term.TermId || term.TermText || index}>{typeof term === 'string' ? term : term.TermText}</li>)}</ol></section>
@@ -1773,6 +1933,25 @@ function calculateInclusiveTax(amount, taxRate) {
 function PaymentsPage() {
   const [payments, setPayments] = useState([]);
   const [error, setError] = useState('');
+  const [filters, setFilters] = useState({});
+  const [viewingPayment, setViewingPayment] = useState(null);
+
+  const visiblePayments = useMemo(() => {
+    const matches = (value, filter) => String(value ?? '').toLowerCase().includes(String(filter || '').trim().toLowerCase());
+    return payments.filter((payment) => (
+      matches(payment.BillNumber, filters.billNumber)
+      && matches(String(payment.BillDate || '').slice(0, 10), filters.billDate)
+      && matches(payment.CustomerName, filters.client)
+      && matches(payment.PaymentMode, filters.mode)
+      && matches(payment.BranchName || 'Head Office', filters.branch)
+      && matches(String(payment.PaymentDate || '').slice(0, 10), filters.paymentDate)
+      && matches(Number(payment.Amount || 0).toFixed(2), filters.amount)
+      && matches(payment.ReferenceNumber, filters.reference)
+      && matches(payment.Notes, filters.details)
+    ));
+  }, [filters, payments]);
+
+  const updateFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
 
   const loadPayments = async () => {
     try {
@@ -1794,15 +1973,28 @@ function PaymentsPage() {
       <PageHeader title="Payment List" subtitle="Payments recorded against sale bills" />
       {error && <div className="error-box" role="alert">{error}</div>}
 
-      <div className="card list-card">
+      <div className="card list-card payments-list-card">
+        <div className="bill-list-heading"><div><h3>Payment Register</h3><p>Filter payments by any column.</p></div><span className="bill-count-pill">{visiblePayments.length} payments</span></div>
         <table>
           <thead>
             <tr>
-              <th>Bill No.</th><th>Bill Date</th><th>Client</th><th>Mode</th><th>Branch</th><th>Payment Date</th><th>Amount</th><th>Reference</th><th>Details</th>
+              <th>Bill No.</th><th>Bill Date</th><th>Client</th><th>Mode</th><th>Branch</th><th>Payment Date</th><th>Amount</th><th>Reference</th><th>Details</th><th>Action</th>
+            </tr>
+            <tr className="column-filter-row">
+              <th><input aria-label="Filter by bill number" placeholder="Bill no." value={filters.billNumber || ''} onChange={(event) => updateFilter('billNumber', event.target.value)} /></th>
+              <th><input aria-label="Filter by bill date" type="date" value={filters.billDate || ''} onChange={(event) => updateFilter('billDate', event.target.value)} /></th>
+              <th><input aria-label="Filter by client" placeholder="Client" value={filters.client || ''} onChange={(event) => updateFilter('client', event.target.value)} /></th>
+              <th><input aria-label="Filter by payment mode" placeholder="Mode" value={filters.mode || ''} onChange={(event) => updateFilter('mode', event.target.value)} /></th>
+              <th><input aria-label="Filter by branch" placeholder="Branch" value={filters.branch || ''} onChange={(event) => updateFilter('branch', event.target.value)} /></th>
+              <th><input aria-label="Filter by payment date" type="date" value={filters.paymentDate || ''} onChange={(event) => updateFilter('paymentDate', event.target.value)} /></th>
+              <th><input aria-label="Filter by amount" placeholder="Amount" inputMode="decimal" value={filters.amount || ''} onChange={(event) => updateFilter('amount', event.target.value)} /></th>
+              <th><input aria-label="Filter by reference" placeholder="Reference" value={filters.reference || ''} onChange={(event) => updateFilter('reference', event.target.value)} /></th>
+              <th><input aria-label="Filter by details" placeholder="Details" value={filters.details || ''} onChange={(event) => updateFilter('details', event.target.value)} /></th>
+              <th><button type="button" className="table-btn" onClick={() => setFilters({})}>Clear</button></th>
             </tr>
           </thead>
           <tbody>
-            {payments.map((payment) => (
+            {visiblePayments.map((payment) => (
               <tr key={payment.PaymentId || payment.ReferenceNumber}>
                 <td>{payment.BillNumber || '—'}</td>
                 <td>{String(payment.BillDate || '').slice(0, 10)}</td>
@@ -1813,12 +2005,28 @@ function PaymentsPage() {
                 <td>{formatINR(payment.Amount)}</td>
                 <td>{payment.ReferenceNumber}</td>
                 <td>{payment.Notes}</td>
+                <td><button type="button" className="table-btn" onClick={() => setViewingPayment(payment)}>View</button></td>
               </tr>
             ))}
-            {!payments.length && <tr><td colSpan="9">No payments recorded yet.</td></tr>}
+            {!visiblePayments.length && <tr><td colSpan="10">No payments match these filters.</td></tr>}
           </tbody>
         </table>
       </div>
+      {viewingPayment && <div className="modal-backdrop" role="presentation" onClick={() => setViewingPayment(null)}>
+        <section className="payment-view-modal" role="dialog" aria-modal="true" aria-labelledby="payment-view-title" onClick={(event) => event.stopPropagation()}>
+          <header><div><span>PAYMENT RECEIPT</span><h2 id="payment-view-title">{viewingPayment.BillNumber || 'Payment details'}</h2></div><button type="button" aria-label="Close payment details" onClick={() => setViewingPayment(null)}>×</button></header>
+          <div className="payment-view-amount"><span>Amount received</span><strong>{formatINR(viewingPayment.Amount)}</strong><small>{viewingPayment.PaymentMode || 'Payment'}</small></div>
+          <div className="payment-view-grid">
+            <div><span>Client</span><strong>{viewingPayment.CustomerName || '—'}</strong></div>
+            <div><span>Branch</span><strong>{viewingPayment.BranchName || 'Head Office'}</strong></div>
+            <div><span>Bill date</span><strong>{String(viewingPayment.BillDate || '').slice(0, 10) || '—'}</strong></div>
+            <div><span>Payment date</span><strong>{String(viewingPayment.PaymentDate || '').slice(0, 10) || '—'}</strong></div>
+            <div><span>Reference</span><strong>{viewingPayment.ReferenceNumber || '—'}</strong></div>
+            <div><span>Details</span><strong>{viewingPayment.Notes || '—'}</strong></div>
+          </div>
+          <footer><button type="button" className="primary-btn" onClick={() => setViewingPayment(null)}>Done</button></footer>
+        </section>
+      </div>}
     </div>
   );
 }
@@ -1826,38 +2034,68 @@ function PaymentsPage() {
 function ReportsPage() {
   const { hasAccess } = useAuth();
   const [report, setReport] = useState({ branchSummary: [], paymentSummary: [], totalRevenue: 0 });
+  const [filters, setFilters] = useState({ fromDate: '', toDate: '' });
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (hasAccess('reports', 'canView')) {
-      api.get('/reports').then((response) => setReport(response.data)).catch(() => {});
-    }
-  }, [hasAccess]);
+    if (!hasAccess('reports', 'canView')) return undefined;
+    let active = true;
+    setLoading(true);
+    api.get('/reports', { params: filters })
+      .then((response) => { if (active) { setReport(response.data); setError(''); } })
+      .catch((requestError) => { if (active) setError(requestError.response?.data?.message || 'Could not load reports.'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [filters, hasAccess]);
+
+  const setDateRange = (days) => {
+    const today = new Date();
+    const from = new Date();
+    from.setDate(from.getDate() - days + 1);
+    setFilters({ fromDate: getLocalDateKey(from), toDate: getLocalDateKey(today) });
+  };
+  const maxBranchRevenue = Math.max(1, ...report.branchSummary.map((row) => Number(row.TotalRevenue || 0)));
+  const maxModeAmount = Math.max(1, ...report.paymentSummary.map((row) => Number(row.amount || 0)));
 
   return (
     <div>
-      <PageHeader title="Reports" subtitle="Analytics and summaries" />
-      <div className="stats-grid">
+      <PageHeader title="Reports" subtitle="Revenue and payment performance for the selected period" />
+      <div className="report-toolbar card">
+        <div><span className="report-filter-kicker">REPORT PERIOD</span><h3>Choose a duration</h3>{loading && <small className="report-loading">Updating report…</small>}</div>
+        <div className="report-range-controls">
+          <label><span>From</span><input type="date" value={filters.fromDate} onChange={(event) => setFilters((current) => ({ ...current, fromDate: event.target.value }))} /></label>
+          <label><span>To</span><input type="date" value={filters.toDate} onChange={(event) => setFilters((current) => ({ ...current, toDate: event.target.value }))} /></label>
+          <div className="report-presets"><button type="button" className="table-btn" onClick={() => setDateRange(7)}>7 days</button><button type="button" className="table-btn" onClick={() => setDateRange(30)}>30 days</button><button type="button" className="table-btn" onClick={() => setFilters({ fromDate: '', toDate: '' })}>All time</button></div>
+        </div>
+      </div>
+      {error && <div className="error-box" role="alert">{error}</div>}
+      <div className="stats-grid report-summary-grid">
         <StatCard title="Total Revenue" value={`₹${Number(report.totalRevenue || 0).toLocaleString()}`} />
+        <StatCard title="Active Branches" value={report.branchSummary.length} />
+        <StatCard title="Payment Modes" value={report.paymentSummary.length} />
       </div>
 
-      <div className="grid-two">
-        <div className="card section-card">
+      <div className="grid-two report-panels">
+        <div className="card section-card report-panel">
           <h3>Branch Revenue</h3>
           <ul className="list-plain">
             {report.branchSummary.map((row) => (
               <li key={row.BranchName}>
-                <strong>{row.BranchName}:</strong> ₹{Number(row.TotalRevenue || 0).toLocaleString()}
+                <div className="report-bar-label"><strong>{row.BranchName}</strong><span>{row.TotalBills || 0} bills · {formatINR(row.TotalRevenue)}</span></div>
+                <div className="report-bar-track"><i style={{ width: `${Math.max(Number(row.TotalRevenue || 0) > 0 ? 4 : 0, (Number(row.TotalRevenue || 0) / maxBranchRevenue) * 100)}%` }} /></div>
               </li>
             ))}
           </ul>
         </div>
 
-        <div className="card section-card">
+        <div className="card section-card report-panel">
           <h3>Payment Modes</h3>
           <ul className="list-plain">
             {report.paymentSummary.map((row) => (
               <li key={row.mode}>
-                <strong>{row.mode}:</strong> ₹{Number(row.amount || 0).toLocaleString()}
+                <div className="report-bar-label"><strong>{row.mode}</strong><span>{formatINR(row.amount)}</span></div>
+                <div className="report-bar-track report-payment-track"><i style={{ width: `${Math.max(Number(row.amount || 0) > 0 ? 4 : 0, (Number(row.amount || 0) / maxModeAmount) * 100)}%` }} /></div>
               </li>
             ))}
           </ul>

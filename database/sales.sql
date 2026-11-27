@@ -1,6 +1,19 @@
 USE [HairWigHouseDb];
 GO
 
+IF OBJECT_ID(N'dbo.SaleBillTerms', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.SaleBillTerms
+    (
+        BillId uniqueidentifier NOT NULL,
+        DisplayOrder int NOT NULL,
+        TermText nvarchar(1000) NOT NULL,
+        CONSTRAINT PK_SaleBillTerms PRIMARY KEY (BillId, DisplayOrder),
+        CONSTRAINT FK_SaleBillTerms_SaleBills FOREIGN KEY (BillId) REFERENCES dbo.SaleBills(BillId)
+    );
+END;
+GO
+
 IF COL_LENGTH(N'dbo.SaleBills', N'CustomerEmail') IS NULL
 BEGIN
     ALTER TABLE dbo.SaleBills
@@ -21,6 +34,14 @@ BEGIN
     ALTER TABLE dbo.SaleBills
     ADD OuterState bit NOT NULL
         CONSTRAINT DF_SaleBills_OuterState DEFAULT 0;
+END;
+GO
+
+IF COL_LENGTH(N'dbo.SaleBills', N'PreviousBalance') IS NULL
+BEGIN
+    ALTER TABLE dbo.SaleBills
+    ADD PreviousBalance decimal(18,2) NOT NULL
+        CONSTRAINT DF_SaleBills_PreviousBalance DEFAULT 0;
 END;
 GO
 
