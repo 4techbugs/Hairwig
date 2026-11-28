@@ -1,4 +1,4 @@
-USE [HairWigHouseDb];
+USE [hairpatchdb];
 GO
 
 IF OBJECT_ID(N'dbo.BranchTermsConditions', N'U') IS NULL
@@ -15,6 +15,13 @@ BEGIN
         CONSTRAINT PK_BranchTermsConditions PRIMARY KEY (TermId),
         CONSTRAINT FK_BranchTermsConditions_Branches FOREIGN KEY (BranchId) REFERENCES dbo.Branches(BranchId)
     );
+END;
+GO
+
+IF COL_LENGTH(N'dbo.Branches', N'StateCode') IS NULL
+BEGIN
+    ALTER TABLE dbo.Branches ADD StateCode nvarchar(2) NOT NULL
+        CONSTRAINT DF_Branches_StateCode DEFAULT N'';
 END;
 GO
 
@@ -93,6 +100,7 @@ BEGIN
         TotalPrice decimal(18,2) NOT NULL,
         TreatmentType nvarchar(80) NOT NULL,
         ProductType nvarchar(80) NOT NULL,
+        HSNCode nvarchar(20) NOT NULL CONSTRAINT DF_Treatments_HSNCode DEFAULT N'',
         IsActive bit NOT NULL CONSTRAINT DF_Treatments_IsActive DEFAULT 1,
         CreatedAt datetime2(0) NOT NULL CONSTRAINT DF_Treatments_CreatedAt DEFAULT SYSUTCDATETIME(),
         ModifiedAt datetime2(0) NOT NULL CONSTRAINT DF_Treatments_ModifiedAt DEFAULT SYSUTCDATETIME(),
@@ -100,6 +108,13 @@ BEGIN
         CONSTRAINT CK_Treatments_TaxRate CHECK (TaxRate >= 0),
         CONSTRAINT CK_Treatments_TotalPrice CHECK (TotalPrice >= 0)
     );
+END;
+GO
+
+IF COL_LENGTH(N'dbo.Treatments', N'HSNCode') IS NULL
+BEGIN
+    ALTER TABLE dbo.Treatments ADD HSNCode nvarchar(20) NOT NULL
+        CONSTRAINT DF_Treatments_HSNCode DEFAULT N'';
 END;
 GO
 

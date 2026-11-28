@@ -24,6 +24,7 @@ BEGIN
         Phone nvarchar(30) NOT NULL CONSTRAINT DF_Branches_Phone DEFAULT N'',
         Email nvarchar(254) NOT NULL CONSTRAINT DF_Branches_Email DEFAULT N'',
         GSTNumber nvarchar(30) NOT NULL CONSTRAINT DF_Branches_GSTNumber DEFAULT N'',
+        StateCode nvarchar(2) NOT NULL CONSTRAINT DF_Branches_StateCode DEFAULT N'',
         PANNumber nvarchar(30) NOT NULL CONSTRAINT DF_Branches_PANNumber DEFAULT N'',
         InvoicePrefix nvarchar(10) NOT NULL,
         IsActive bit NOT NULL CONSTRAINT DF_Branches_IsActive DEFAULT 1,
@@ -33,6 +34,13 @@ BEGIN
         CONSTRAINT UQ_Branches_BranchCode UNIQUE (BranchCode),
         CONSTRAINT UQ_Branches_InvoicePrefix UNIQUE (InvoicePrefix)
     );
+END;
+GO
+
+IF COL_LENGTH(N'dbo.Branches', N'StateCode') IS NULL
+BEGIN
+    ALTER TABLE dbo.Branches ADD StateCode nvarchar(2) NOT NULL
+        CONSTRAINT DF_Branches_StateCode DEFAULT N'';
 END;
 GO
 
@@ -147,6 +155,8 @@ BEGIN
         TotalAmount decimal(18,2) NOT NULL CONSTRAINT DF_SaleBills_TotalAmount DEFAULT 0,
         DiscountAmount decimal(18,2) NOT NULL CONSTRAINT DF_SaleBills_DiscountAmount DEFAULT 0,
         GSTAmount decimal(18,2) NOT NULL CONSTRAINT DF_SaleBills_GSTAmount DEFAULT 0,
+        BranchGSTIN nvarchar(30) NOT NULL CONSTRAINT DF_SaleBills_BranchGSTIN DEFAULT N'',
+        BranchStateCode nvarchar(2) NOT NULL CONSTRAINT DF_SaleBills_BranchStateCode DEFAULT N'',
         NetAmount decimal(18,2) NOT NULL CONSTRAINT DF_SaleBills_NetAmount DEFAULT 0,
         PreviousBalance decimal(18,2) NOT NULL CONSTRAINT DF_SaleBills_PreviousBalance DEFAULT 0,
         Notes nvarchar(500) NOT NULL CONSTRAINT DF_SaleBills_Notes DEFAULT N'',
@@ -157,6 +167,18 @@ BEGIN
         CONSTRAINT FK_SaleBills_Customers FOREIGN KEY (CustomerId) REFERENCES dbo.Customers(CustomerId),
         CONSTRAINT UQ_SaleBills_BillNumber UNIQUE (BillNumber)
     );
+END;
+GO
+
+IF COL_LENGTH(N'dbo.SaleBills', N'BranchGSTIN') IS NULL
+BEGIN
+    ALTER TABLE dbo.SaleBills ADD BranchGSTIN nvarchar(30) NOT NULL
+        CONSTRAINT DF_SaleBills_BranchGSTIN DEFAULT N'';
+END;
+IF COL_LENGTH(N'dbo.SaleBills', N'BranchStateCode') IS NULL
+BEGIN
+    ALTER TABLE dbo.SaleBills ADD BranchStateCode nvarchar(2) NOT NULL
+        CONSTRAINT DF_SaleBills_BranchStateCode DEFAULT N'';
 END;
 GO
 

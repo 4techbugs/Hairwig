@@ -42,7 +42,7 @@ const mockBranchAdminPasswordHash = process.env.MOCK_BRANCH_ADMIN_PASSWORD
 
 const dbConfig = {
   server: process.env.DB_SERVER || '',
-  database: process.env.DB_NAME || 'HairWigHouseDb',
+  database: process.env.DB_NAME || 'hairpatchdb',
   ...(useWindowsAuth
     ? {
       driver: process.env.DB_DRIVER || 'ODBC Driver 17 for SQL Server',
@@ -487,6 +487,7 @@ const masterDefinitions = [
     fields: [
       { name: 'TreatmentName', type: sql.NVarChar(180), required: true, maxLength: 180 },
       { name: 'AliasName', type: sql.NVarChar(180), required: true, maxLength: 180 },
+      { name: 'HSNCode', type: sql.NVarChar(20), maxLength: 20 },
       { name: 'TaxRate', type: sql.Decimal(5, 2), required: true, numeric: true, max: 100 },
       { name: 'TotalPrice', type: sql.Decimal(18, 2), required: true, numeric: true },
       { name: 'TreatmentType', type: sql.NVarChar(80), required: true, maxLength: 80 },
@@ -959,7 +960,7 @@ app.get('/api/branches', authRequired, (req, res) => {
         .input('IsSuperAdmin', sql.Bit, isSuperAdmin(req))
         .input('BranchId', sql.UniqueIdentifier, req.user.branchId || null)
         .query(`
-          SELECT b.BranchId, b.BranchCode, b.BranchName, b.Address, b.BillPrefix AS InvoicePrefix,
+          SELECT b.BranchId, b.BranchCode, b.BranchName, b.Address, b.GSTNumber AS GSTIN, b.StateCode, b.BillPrefix AS InvoicePrefix,
                  b.IsActive, t.TermId, t.TermText, t.DisplayOrder
           FROM dbo.Branches AS b
           LEFT JOIN dbo.BranchTermsConditions AS t
@@ -981,6 +982,8 @@ app.get('/api/branches', authRequired, (req, res) => {
               BranchCode: row.BranchCode,
               BranchName: row.BranchName,
               Address: row.Address,
+              GSTIN: row.GSTIN,
+              StateCode: row.StateCode,
               InvoicePrefix: row.InvoicePrefix,
               IsActive: row.IsActive,
               Terms: [],
@@ -1010,7 +1013,7 @@ app.get('/api/branches', authRequired, (req, res) => {
     return matchesSearch && matchesActive && matchesBranch;
   });
 
-  res.json(data);
+  res.json(data.map((branch) => ({ ...branch, GSTIN: branch.GSTIN || branch.GSTNumber || '', StateCode: branch.StateCode || '' })));
 });
 
 app.post('/api/branches', authRequired, async (req, res) => {
@@ -1025,6 +1028,8 @@ app.post('/api/branches', authRequired, async (req, res) => {
     BranchCode: String(req.body?.BranchCode || '').trim(),
     BranchName: String(req.body?.BranchName || '').trim(),
     Address: String(req.body?.Address || '').trim(),
+    GSTIN: String(req.body?.GSTIN || '').trim().toUpperCase(),
+    StateCode: String(req.body?.StateCode || '').trim(),
     Terms: Array.isArray(req.body?.Terms)
       ? req.body.Terms.map((term) => String(term || '').trim()).filter(Boolean)
       : [],
@@ -1035,6 +1040,7 @@ app.post('/api/branches', authRequired, async (req, res) => {
   }
 
   if (branch.BranchCode.length > 20 || branch.BranchName.length > 120 || branch.Address.length > 300
+      || branch.GSTIN.length > 30 || !/^\d{0,2}$/.test(branch.StateCode)
       || branch.Terms.some((term) => term.length > 1000)) {
     return res.status(400).json({ message: 'One or more branch fields exceed the allowed length.' });
   }
@@ -1060,16 +1066,19 @@ app.post('/api/branches', authRequired, async (req, res) => {
     const inserted = await transaction.request()
       .input('BranchCode', sql.NVarChar(20), branch.BranchCode)
       .input('BranchName', sql.NVarChar(120), branch.BranchName)
+      .input('GSTIN', sql.NVarChar(30), branch.GSTIN)
+      .input('StateCode', sql.NVarChar(2), branch.StateCode)
       .input('BillPrefix', sql.NVarChar(10), branch.BranchCode.slice(0, 10))
       .input('Address', sql.NVarChar(300), branch.Address)
       .query(`
         INSERT INTO dbo.Branches
           (BranchId, BranchCode, BranchName, Address, City, State, Pincode, Phone, Email,
-           GSTNumber, PANNumber, ContactPerson, BillPrefix, NextBillNumber, IsActive, CreatedAt, ModifiedAt)
+           GSTNumber, StateCode, PANNumber, ContactPerson, BillPrefix, NextBillNumber, IsActive, CreatedAt, ModifiedAt)
         OUTPUT inserted.BranchId, inserted.BranchCode, inserted.BranchName,
-               inserted.Address, inserted.BillPrefix AS InvoicePrefix, inserted.IsActive
+               inserted.Address, inserted.GSTNumber AS GSTIN, inserted.StateCode,
+               inserted.BillPrefix AS InvoicePrefix, inserted.IsActive
         VALUES (NEWID(), @BranchCode, @BranchName, @Address, N'', N'', N'', N'', N'',
-                N'', N'', N'', @BillPrefix, 1, 1, SYSUTCDATETIME(), SYSUTCDATETIME())
+                @GSTIN, @StateCode, N'', N'', @BillPrefix, 1, 1, SYSUTCDATETIME(), SYSUTCDATETIME())
       `);
     const createdBranch = inserted.recordset[0];
     for (let index = 0; index < branch.Terms.length; index += 1) {
@@ -1118,6 +1127,8 @@ app.put('/api/branches/:id', authRequired, async (req, res) => {
     BranchCode: String(req.body?.BranchCode || '').trim(),
     BranchName: String(req.body?.BranchName || '').trim(),
     Address: String(req.body?.Address || '').trim(),
+    GSTIN: String(req.body?.GSTIN || '').trim().toUpperCase(),
+    StateCode: String(req.body?.StateCode || '').trim(),
     Terms: Array.isArray(req.body?.Terms)
       ? req.body.Terms.map((term) => String(term || '').trim()).filter(Boolean)
       : [],
@@ -1126,6 +1137,7 @@ app.put('/api/branches/:id', authRequired, async (req, res) => {
     return res.status(400).json({ message: 'Branch code, name, address, and at least one term are required.' });
   }
   if (branch.BranchCode.length > 20 || branch.BranchName.length > 120 || branch.Address.length > 300
+      || branch.GSTIN.length > 30 || !/^\d{0,2}$/.test(branch.StateCode)
       || branch.Terms.some((term) => term.length > 1000)) {
     return res.status(400).json({ message: 'One or more branch fields exceed the allowed length.' });
   }
@@ -1150,14 +1162,17 @@ app.put('/api/branches/:id', authRequired, async (req, res) => {
       .input('BranchId', sql.UniqueIdentifier, req.params.id)
       .input('BranchCode', sql.NVarChar(20), branch.BranchCode)
       .input('BranchName', sql.NVarChar(120), branch.BranchName)
+      .input('GSTIN', sql.NVarChar(30), branch.GSTIN)
+      .input('StateCode', sql.NVarChar(2), branch.StateCode)
       .input('BillPrefix', sql.NVarChar(10), branch.BranchCode.slice(0, 10))
       .input('Address', sql.NVarChar(300), branch.Address)
       .query(`
         UPDATE dbo.Branches
         SET BranchCode = @BranchCode, BranchName = @BranchName, BillPrefix = @BillPrefix,
-            Address = @Address, ModifiedAt = SYSUTCDATETIME()
+            Address = @Address, GSTNumber = @GSTIN, StateCode = @StateCode, ModifiedAt = SYSUTCDATETIME()
         OUTPUT inserted.BranchId, inserted.BranchCode, inserted.BranchName,
-               inserted.Address, inserted.BillPrefix AS InvoicePrefix, inserted.IsActive
+                inserted.Address, inserted.GSTNumber AS GSTIN, inserted.StateCode,
+                inserted.BillPrefix AS InvoicePrefix, inserted.IsActive
         WHERE BranchId = @BranchId AND IsActive = 1
       `);
     if (!updated.recordset.length) {
@@ -2289,7 +2304,19 @@ app.get('/api/bills/:id', authRequired, async (req, res) => {
       .filter((payment) => (payment.SaleBillId || payment.BillId) === billId)
       .map(({ PaymentId, PaymentMode, Amount }) => ({ PaymentId, PaymentMode, Amount }));
     const paidAmount = payments.reduce((sum, payment) => sum + Number(payment.Amount || 0), 0);
-    return res.json({ ...bill, PaidAmount: paidAmount, Treatments: bill.Treatments || [], Items: bill.Items || [], Payments: payments, Terms: terms });
+    return res.json({
+      ...bill,
+      BranchGSTIN: bill.BranchGSTIN || branch?.GSTIN || branch?.GSTNumber || '',
+      BranchStateCode: bill.BranchStateCode || branch?.StateCode || '',
+      PaidAmount: paidAmount,
+      Treatments: (bill.Treatments || []).map((row) => ({
+        ...row,
+        HSNCode: row.HSNCode || mockData.treatments.find((treatment) => String(treatment.TreatmentId) === String(row.TreatmentId))?.HSNCode || '',
+      })),
+      Items: bill.Items || [],
+      Payments: payments,
+      Terms: terms,
+    });
   }
   try {
     const pool = await connectDatabase();
@@ -2298,7 +2325,8 @@ app.get('/api/bills/:id', authRequired, async (req, res) => {
       .input('IsSuperAdmin', sql.Bit, isSuperAdmin(req))
       .input('BranchId', sql.UniqueIdentifier, req.user.branchId || null)
       .query(`
-        SELECT b.BillId AS SaleBillId, b.BranchId, br.BranchName, b.BillNumber,
+        SELECT b.BillId AS SaleBillId, b.BranchId, br.BranchName,
+               b.BranchGSTIN, b.BranchStateCode, b.BillNumber,
                b.BillDate, b.CustomerName, b.CustomerMobile, b.CustomerAddress,
                b.CustomerEmail, b.CustomerGSTNumber, b.NextServiceDate, b.PreviousBalance, b.PaymentMode,
                b.Subtotal, b.DiscountTotal, b.TaxableAmount, b.CGST, b.SGST, b.IGST,
@@ -2312,7 +2340,7 @@ app.get('/api/bills/:id', authRequired, async (req, res) => {
     if (!bill) return res.status(404).json({ message: 'Bill not found.' });
     const [treatments, items, payments, terms] = await Promise.all([
       pool.request().input('BillId', sql.UniqueIdentifier, billId)
-        .query('SELECT TreatmentId, TreatmentName, StaffName, TaxRate, GSTAmount, Price, IsPrinted FROM dbo.SaleBillTreatments WHERE BillId = @BillId ORDER BY SrNo'),
+        .query('SELECT TreatmentId, TreatmentName, HSNCode, StaffName, TaxRate, GSTAmount, Price, IsPrinted FROM dbo.SaleBillTreatments WHERE BillId = @BillId ORDER BY SrNo'),
       pool.request().input('BillId', sql.UniqueIdentifier, billId)
         .query('SELECT ItemId, ItemName, Description AS Remarks, Quantity, Unit, Rate, TaxPercent AS TaxRate, TaxAmount, LineTotal FROM dbo.SaleBillItems WHERE BillId = @BillId ORDER BY SrNo'),
       pool.request().input('BillId', sql.UniqueIdentifier, billId)
@@ -2413,7 +2441,10 @@ app.put('/api/bills/:id', authRequired, async (req, res) => {
     const bill = mockData.bills.find((item) => (item.SaleBillId || item.BillId) === billId && item.Status !== 'VOID');
     if (!bill) return res.status(404).json({ message: 'Bill not found.' });
     if (!isSuperAdmin(req) && bill.BranchId !== req.user.branchId) return res.status(403).json({ message: 'Access denied.' });
-    const treatments = treatmentInputs.map((row) => ({ ...row, TreatmentName: row.TreatmentName || mockData.treatments.find((item) => String(item.TreatmentId) === String(row.TreatmentId))?.TreatmentName || '', Price: Number(row.Price), GSTAmount: Number(row.GSTAmount) }));
+    const treatments = treatmentInputs.map((row) => {
+      const masterTreatment = mockData.treatments.find((item) => String(item.TreatmentId) === String(row.TreatmentId));
+      return { ...row, TreatmentName: row.TreatmentName || masterTreatment?.TreatmentName || '', HSNCode: row.HSNCode || masterTreatment?.HSNCode || '', Price: Number(row.Price), GSTAmount: Number(row.GSTAmount) };
+    });
     const items = itemInputs.map((row) => ({ ...row, ItemName: row.ItemName || mockData.items.find((item) => String(item.ItemId) === String(row.ItemId))?.ItemName || '', Quantity: Number(row.Quantity), Rate: Number(row.Rate), LineTotal: roundMoney(Number(row.Quantity) * Number(row.Rate)) }));
     const total = roundMoney(treatments.reduce((sum, row) => sum + row.Price, 0)
       + items.reduce((sum, row) => sum + row.LineTotal, 0) + Number(bill.PreviousBalance || 0));
@@ -2457,13 +2488,13 @@ app.put('/api/bills/:id', authRequired, async (req, res) => {
     const treatments = [];
     for (const row of treatmentInputs) {
       const selectedResult = await transaction.request().input('TreatmentId', sql.UniqueIdentifier, String(row.TreatmentId).trim())
-        .query('SELECT TreatmentId, TreatmentName, TaxRate, TotalPrice FROM dbo.Treatments WHERE TreatmentId = @TreatmentId AND IsActive = 1');
+      .query('SELECT TreatmentId, TreatmentName, HSNCode, TaxRate, TotalPrice FROM dbo.Treatments WHERE TreatmentId = @TreatmentId AND IsActive = 1');
       const selected = selectedResult.recordset[0];
       if (!selected) { await transaction.rollback(); transactionStarted = false; return res.status(400).json({ message: 'A selected treatment does not exist or is inactive.' }); }
       const price = roundMoney(Number(row.Price));
       const gstAmount = roundMoney(Number(row.GSTAmount));
       if (gstAmount > price) { await transaction.rollback(); transactionStarted = false; return res.status(400).json({ message: 'GST amount cannot be greater than the treatment price.' }); }
-      treatments.push({ TreatmentId: selected.TreatmentId, TreatmentName: selected.TreatmentName, StaffName: String(row.StaffName || '').trim(), TaxRate: Number(selected.TaxRate), GSTAmount: gstAmount, Price: price, IsPrinted: row.IsPrinted === true });
+      treatments.push({ TreatmentId: selected.TreatmentId, TreatmentName: selected.TreatmentName, HSNCode: selected.HSNCode || '', StaffName: String(row.StaffName || '').trim(), TaxRate: Number(selected.TaxRate), GSTAmount: gstAmount, Price: price, IsPrinted: row.IsPrinted === true });
     }
     const items = [];
     for (const row of itemInputs) {
@@ -2578,9 +2609,10 @@ app.put('/api/bills/:id', authRequired, async (req, res) => {
       const row = treatments[index];
       await transaction.request().input('BillId', sql.UniqueIdentifier, billId).input('SrNo', sql.Int, index + 1)
         .input('TreatmentId', sql.UniqueIdentifier, row.TreatmentId).input('TreatmentName', sql.NVarChar(180), row.TreatmentName)
+        .input('HSNCode', sql.NVarChar(20), row.HSNCode)
         .input('StaffName', sql.NVarChar(120), row.StaffName).input('TaxRate', sql.Decimal(5, 2), row.TaxRate)
         .input('GSTAmount', sql.Decimal(18, 2), row.GSTAmount).input('Price', sql.Decimal(18, 2), row.Price).input('IsPrinted', sql.Bit, row.IsPrinted)
-        .query(`INSERT INTO dbo.SaleBillTreatments (TreatmentLineId, BillId, SrNo, TreatmentId, TreatmentName, StaffName, TaxRate, GSTAmount, Price, IsPrinted, CreatedAt) VALUES (NEWID(), @BillId, @SrNo, @TreatmentId, @TreatmentName, @StaffName, @TaxRate, @GSTAmount, @Price, @IsPrinted, SYSUTCDATETIME())`);
+        .query(`INSERT INTO dbo.SaleBillTreatments (TreatmentLineId, BillId, SrNo, TreatmentId, TreatmentName, HSNCode, StaffName, TaxRate, GSTAmount, Price, IsPrinted, CreatedAt) VALUES (NEWID(), @BillId, @SrNo, @TreatmentId, @TreatmentName, @HSNCode, @StaffName, @TaxRate, @GSTAmount, @Price, @IsPrinted, SYSUTCDATETIME())`);
     }
     for (let index = 0; index < items.length; index += 1) {
       const row = items[index];
@@ -2728,6 +2760,12 @@ app.post('/api/bills', authRequired, async (req, res) => {
       ),
       OuterState: false,
       BranchName: branch.BranchName,
+      BranchGSTIN: branch.GSTIN || branch.GSTNumber || '',
+      BranchStateCode: branch.StateCode || '',
+      Treatments: treatmentInputs.map((row) => {
+        const masterTreatment = mockData.treatments.find((treatment) => String(treatment.TreatmentId) === String(row.TreatmentId));
+        return { ...row, TreatmentName: masterTreatment?.TreatmentName || '', HSNCode: masterTreatment?.HSNCode || '', TaxRate: Number(masterTreatment?.TaxRate || 0) };
+      }),
       ClientId: clientId,
       PreviousBalance: previousBalance,
       NetAmount: mockTotalWithBalance,
@@ -2759,7 +2797,7 @@ app.post('/api/bills', authRequired, async (req, res) => {
     const branchResult = await transaction.request()
       .input('BranchId', sql.UniqueIdentifier, branchId)
       .query(`
-        SELECT BranchCode, BranchName
+        SELECT BranchCode, BranchName, GSTNumber AS GSTIN, StateCode
         FROM dbo.Branches WITH (UPDLOCK, HOLDLOCK)
         WHERE BranchId = @BranchId AND IsActive = 1
       `);
@@ -2775,7 +2813,7 @@ app.post('/api/bills', authRequired, async (req, res) => {
       const selectedResult = await transaction.request()
         .input('TreatmentId', sql.UniqueIdentifier, String(row.TreatmentId).trim())
         .query(`
-          SELECT TreatmentId, TreatmentName, TaxRate, TotalPrice
+          SELECT TreatmentId, TreatmentName, HSNCode, TaxRate, TotalPrice
           FROM dbo.Treatments
           WHERE TreatmentId = @TreatmentId AND IsActive = 1
         `);
@@ -2798,6 +2836,7 @@ app.post('/api/bills', authRequired, async (req, res) => {
       treatments.push({
         TreatmentId: selected.TreatmentId,
         TreatmentName: selected.TreatmentName,
+        HSNCode: selected.HSNCode || '',
         StaffName: String(row.StaffName || '').trim(),
         TaxRate: taxRate,
         GSTAmount: gstAmount,
@@ -2915,6 +2954,8 @@ app.post('/api/bills', authRequired, async (req, res) => {
       .input('CustomerMobile', sql.NVarChar(30), customerMobile)
       .input('CustomerAddress', sql.NVarChar(400), customerAddress)
       .input('CustomerGSTNumber', sql.NVarChar(20), '')
+      .input('BranchGSTIN', sql.NVarChar(30), branch.GSTIN || '')
+      .input('BranchStateCode', sql.NVarChar(2), branch.StateCode || '')
       .input('CustomerEmail', sql.NVarChar(254), customerEmail)
       .input('NextServiceDate', sql.Date, nextServiceDate ? new Date(`${nextServiceDate}T00:00:00Z`) : null)
       .input('OuterState', sql.Bit, outerState)
@@ -2931,13 +2972,13 @@ app.post('/api/bills', authRequired, async (req, res) => {
       .query(`
         INSERT INTO dbo.SaleBills
           (BranchId, BillNumber, BillDate, CustomerName, CustomerMobile, CustomerAddress,
-           CustomerGSTNumber, CustomerEmail, NextServiceDate, OuterState, PaymentMode,
+            CustomerGSTNumber, CustomerEmail, NextServiceDate, OuterState, BranchGSTIN, BranchStateCode, PaymentMode,
            Subtotal, DiscountTotal, TaxableAmount, CGST, SGST, IGST, GrandTotal, PreviousBalance,
            BillId, Status, CreatedBy, CreatedAt, ModifiedAt)
         OUTPUT inserted.BillId
         VALUES
           (@BranchId, @BillNumber, @BillDate, @CustomerName, @CustomerMobile, @CustomerAddress,
-           @CustomerGSTNumber, @CustomerEmail, @NextServiceDate, @OuterState, @PaymentMode,
+            @CustomerGSTNumber, @CustomerEmail, @NextServiceDate, @OuterState, @BranchGSTIN, @BranchStateCode, @PaymentMode,
            @Subtotal, @DiscountTotal, @TaxableAmount, @CGST, @SGST, @IGST, @GrandTotal, @PreviousBalance,
            NEWID(), N'PENDING', @CreatedBy, SYSUTCDATETIME(), SYSUTCDATETIME())
       `);
@@ -2995,6 +3036,7 @@ app.post('/api/bills', authRequired, async (req, res) => {
         .input('SrNo', sql.Int, index + 1)
         .input('TreatmentId', sql.UniqueIdentifier, row.TreatmentId)
         .input('TreatmentName', sql.NVarChar(180), row.TreatmentName)
+        .input('HSNCode', sql.NVarChar(20), row.HSNCode)
         .input('StaffName', sql.NVarChar(120), row.StaffName)
         .input('TaxRate', sql.Decimal(5, 2), row.TaxRate)
         .input('GSTAmount', sql.Decimal(18, 2), row.GSTAmount)
@@ -3002,9 +3044,9 @@ app.post('/api/bills', authRequired, async (req, res) => {
         .input('IsPrinted', sql.Bit, row.IsPrinted)
         .query(`
           INSERT INTO dbo.SaleBillTreatments
-            (TreatmentLineId, BillId, SrNo, TreatmentId, TreatmentName, StaffName, TaxRate, GSTAmount, Price, IsPrinted, CreatedAt)
+            (TreatmentLineId, BillId, SrNo, TreatmentId, TreatmentName, HSNCode, StaffName, TaxRate, GSTAmount, Price, IsPrinted, CreatedAt)
           VALUES
-            (NEWID(), @BillId, @SrNo, @TreatmentId, @TreatmentName, @StaffName, @TaxRate, @GSTAmount, @Price, @IsPrinted, SYSUTCDATETIME())
+            (NEWID(), @BillId, @SrNo, @TreatmentId, @TreatmentName, @HSNCode, @StaffName, @TaxRate, @GSTAmount, @Price, @IsPrinted, SYSUTCDATETIME())
         `);
     }
 

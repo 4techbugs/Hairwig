@@ -32,6 +32,8 @@ const emptyBranch = {
   BranchCode: '',
   BranchName: '',
   Address: '',
+  GSTIN: '',
+  StateCode: '',
   Terms: [''],
 };
 
@@ -74,6 +76,7 @@ const emptyTreatment = {
   TotalPrice: '',
   TreatmentType: '',
   ProductType: '',
+  HSNCode: '',
 };
 
 const emptyItem = {
@@ -468,6 +471,8 @@ function BranchesPage() {
       BranchCode: branch.BranchCode || '',
       BranchName: branch.BranchName || '',
       Address: branch.Address || '',
+      GSTIN: branch.GSTIN || '',
+      StateCode: branch.StateCode || '',
       Terms: branch.Terms?.length ? branch.Terms.map((term) => term.TermText) : [''],
     });
     setError('');
@@ -492,6 +497,14 @@ function BranchesPage() {
             <label className="full-width-field">
               <span>Branch Address</span>
               <textarea value={form.Address} onChange={(e) => setForm({ ...form, Address: e.target.value })} required maxLength={300} />
+            </label>
+            <label>
+              <span>GSTIN</span>
+              <input value={form.GSTIN} onChange={(e) => setForm({ ...form, GSTIN: e.target.value.toUpperCase() })} maxLength={30} />
+            </label>
+            <label>
+              <span>State Code</span>
+              <input value={form.StateCode} onChange={(e) => setForm({ ...form, StateCode: e.target.value.replace(/\D/g, '').slice(0, 2) })} inputMode="numeric" maxLength={2} />
             </label>
             <div className="branch-terms full-width-field">
               <div className="master-section-heading">
@@ -564,6 +577,8 @@ function BranchesPage() {
               <th>Code</th>
               <th>Name</th>
               <th>Address</th>
+              <th>GSTIN</th>
+              <th>State Code</th>
               <th>Terms &amp; Conditions</th>
               <th>Status</th>
               <th>Actions</th>
@@ -575,6 +590,8 @@ function BranchesPage() {
                 <td>{branch.BranchCode}</td>
                 <td>{branch.BranchName}</td>
                 <td>{branch.Address}</td>
+                <td>{branch.GSTIN || '—'}</td>
+                <td>{branch.StateCode || '—'}</td>
                 <td>
                   {branch.Terms?.length ? (
                     <details>
@@ -624,7 +641,7 @@ function BranchesPage() {
         <h3>{printBill.CustomerName}</h3><p>{printBill.CustomerMobile} · {printBill.CustomerAddress}</p>
         <table><thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>
           {printBill.Treatments?.filter((row) => row.IsPrinted).map((row, index) => <tr key={`pt-${index}`}><td>{row.TreatmentName}</td><td>1</td><td>{formatINR(row.Price)}</td><td>{formatINR(row.Price)}</td></tr>)}
-          {printBill.Items?.map((row, index) => <tr key={`pi-${index}`}><td>{row.ItemName}</td><td>{row.Quantity} {row.Unit}</td><td>{formatINR(row.Rate)}</td><td>{formatINR(row.LineTotal)}</td></tr>)}
+          {printBill.Items?.map((row, index) => <tr key={`pi-${index}`}><td>{row.ItemName}</td><td>—</td><td>{row.Quantity} {row.Unit}</td><td>{formatINR(row.Rate)}</td><td>{formatINR(row.LineTotal)}</td></tr>)}
         </tbody></table><p><strong>Payment mode:</strong> {printBill.PaymentMode}</p><h2>Total: {formatINR(printBill.NetAmount)}</h2>
         <section className="bill-print-terms"><h3>Terms &amp; Conditions</h3><ol>{printBill.Terms?.map((term, index) => <li key={term.TermId || term.TermText || index}>{typeof term === 'string' ? term : term.TermText}</li>)}</ol></section>
       </section>}
@@ -666,6 +683,7 @@ const treatmentMasterConfig = {
   fields: [
     { name: 'TreatmentName', label: 'Treatment', required: true, maxLength: 180 },
     { name: 'AliasName', label: 'Alias Name', required: true, maxLength: 180 },
+    { name: 'HSNCode', label: 'HSN Code', maxLength: 20 },
     { name: 'TaxRate', label: 'Tax Rate (%)', type: 'number', required: true, min: 0, step: '0.01' },
     { name: 'TotalPrice', label: 'Total Price (including GST)', type: 'number', required: true, min: 0, step: '0.01' },
     { name: 'TreatmentType', label: 'Treatment Type', required: true, options: ['Bill', 'Query'] },
@@ -674,6 +692,7 @@ const treatmentMasterConfig = {
   columns: [
     { key: 'TreatmentName', label: 'Treatment' },
     { key: 'AliasName', label: 'Alias Name' },
+    { key: 'HSNCode', label: 'HSN Code' },
     { key: 'TotalPrice', label: 'Total Price', currency: true },
     { key: 'TreatmentType', label: 'Treatment Type' },
   ],
@@ -1202,6 +1221,7 @@ function BillsPage({ listOnly = false }) {
   const [clientLookupStatus, setClientLookupStatus] = useState({ type: '', message: '' });
   const [previousBalance, setPreviousBalance] = useState(0);
   const autofilledClientRef = useRef(null);
+  const selectedBranch = branches.find((branch) => String(branch.BranchId) === String(form.BranchId));
 
   const loadBills = useCallback(async () => {
     try {
@@ -1415,6 +1435,7 @@ function BillsPage({ listOnly = false }) {
         ? {
           ...row,
           TreatmentId: treatmentId,
+          HSNCode: selected?.HSNCode || '',
           TaxRate: taxRate,
           GSTAmount: calculateInclusiveTax(price, taxRate),
           Price: price,
@@ -1519,6 +1540,7 @@ function BillsPage({ listOnly = false }) {
       ? bill.Treatments.map((row) => ({
         TreatmentId: String(row.TreatmentId),
         TreatmentName: row.TreatmentName || '',
+        HSNCode: row.HSNCode || '',
         StaffName: row.StaffName || '',
         TaxRate: Number(row.TaxRate || 0),
         GSTAmount: Number(row.GSTAmount || 0),
@@ -1637,6 +1659,14 @@ function BillsPage({ listOnly = false }) {
                     </label>
                   )}
                   <label>
+                    <span>Branch GSTIN</span>
+                    <input value={selectedBranch?.GSTIN || selectedBranch?.GSTNumber || ''} readOnly placeholder="Select a branch" />
+                  </label>
+                  <label>
+                    <span>State Code</span>
+                    <input value={selectedBranch?.StateCode || ''} readOnly placeholder="Select a branch" />
+                  </label>
+                  <label>
                     <span>Contact No</span>
                     <input value={form.CustomerMobile} onChange={(event) => handleClientContactChange(event.target.value)} required maxLength={30} />
                     {clientLookupStatus.message && (
@@ -1676,7 +1706,7 @@ function BillsPage({ listOnly = false }) {
                 <div className="sale-table-scroll">
                   <table className="sale-lines-table treatment-lines-table">
                     <thead>
-                      <tr><th>Action</th><th>Treatment Name</th><th>Staff Name</th><th>GST %</th><th>GST Amount</th><th>Price</th><th>Print</th></tr>
+                      <tr><th>Action</th><th>Treatment Name</th><th>HSN Code</th><th>Staff Name</th><th>GST %</th><th>GST Amount</th><th>Price</th><th>Print</th></tr>
                     </thead>
                     <tbody>
                       {treatmentRows.map((row, index) => (
@@ -1689,6 +1719,7 @@ function BillsPage({ listOnly = false }) {
                               {treatments.map((treatment) => <option key={treatment.TreatmentId} value={treatment.TreatmentId}>{treatment.TreatmentName}</option>)}
                             </select>
                           </td>
+                          <td>{row.HSNCode || treatments.find((treatment) => String(treatment.TreatmentId) === String(row.TreatmentId))?.HSNCode || '—'}</td>
                           <td><input value={row.StaffName} onChange={(event) => setTreatmentRows(treatmentRows.map((current, rowIndex) => rowIndex === index ? { ...current, StaffName: event.target.value } : current))} maxLength={120} placeholder="Staff name" /></td>
                           <td><input type="number" value={row.TaxRate} readOnly /></td>
                           <td>
@@ -1886,14 +1917,22 @@ function BillsPage({ listOnly = false }) {
                 </section>
 
                 <section className="bill-view-section">
+                  <div className="bill-view-section-title"><span className="bill-view-section-icon">GST</span><div><h3>Branch tax details</h3><p>Seller details from branch master</p></div></div>
+                  <div className="bill-view-customer-grid">
+                    <div><span>Branch GSTIN</span><strong>{viewingBill.BranchGSTIN || '—'}</strong></div>
+                    <div><span>State Code</span><strong>{viewingBill.BranchStateCode || '—'}</strong></div>
+                  </div>
+                </section>
+
+                <section className="bill-view-section">
                   <div className="bill-view-section-title"><span className="bill-view-section-icon">02</span><div><h3>Bill items</h3><p>{(viewingBill.Treatments?.length || 0) + (viewingBill.Items?.length || 0)} line items</p></div></div>
                   <div className="bill-view-table-wrap">
                     <table className="bill-view-table">
-                      <thead><tr><th>Description</th><th>Staff / Unit</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
+                      <thead><tr><th>Description</th><th>HSN</th><th>Staff / Unit</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
                       <tbody>
-                        {viewingBill.Treatments?.map((row, index) => <tr key={`vt-${row.TreatmentId}-${index}`}><td><strong>{row.TreatmentName}</strong><small>Treatment</small></td><td>{row.StaffName || '—'}</td><td>1</td><td>{formatINR(row.Price)}</td><td className="bill-view-amount">{formatINR(row.Price)}</td></tr>)}
-                        {viewingBill.Items?.map((row, index) => <tr key={`vi-${row.ItemId}-${index}`}><td><strong>{row.ItemName}</strong><small>Product</small></td><td>{row.Unit || '—'}</td><td>{row.Quantity}</td><td>{formatINR(row.Rate)}</td><td className="bill-view-amount">{formatINR(row.LineTotal ?? row.Amount)}</td></tr>)}
-                        {!viewingBill.Treatments?.length && !viewingBill.Items?.length && <tr><td colSpan="5" className="bill-view-empty">No line items found for this bill.</td></tr>}
+                        {viewingBill.Treatments?.map((row, index) => <tr key={`vt-${row.TreatmentId}-${index}`}><td><strong>{row.TreatmentName}</strong><small>Treatment</small></td><td>{row.HSNCode || '—'}</td><td>{row.StaffName || '—'}</td><td>1</td><td>{formatINR(row.Price)}</td><td className="bill-view-amount">{formatINR(row.Price)}</td></tr>)}
+                        {viewingBill.Items?.map((row, index) => <tr key={`vi-${row.ItemId}-${index}`}><td><strong>{row.ItemName}</strong><small>Product</small></td><td>—</td><td>{row.Unit || '—'}</td><td>{row.Quantity}</td><td>{formatINR(row.Rate)}</td><td className="bill-view-amount">{formatINR(row.LineTotal ?? row.Amount)}</td></tr>)}
+                        {!viewingBill.Treatments?.length && !viewingBill.Items?.length && <tr><td colSpan="6" className="bill-view-empty">No line items found for this bill.</td></tr>}
                       </tbody>
                     </table>
                   </div>
@@ -1914,9 +1953,10 @@ function BillsPage({ listOnly = false }) {
       </div>}
       {printBill && <section className="bill-print-sheet">
         <h1>HairWigHouse</h1><h2>Sale Bill {printBill.BillNumber}</h2><p>{printBill.BranchName} · {String(printBill.BillDate || '').slice(0, 10)}</p>
+        <p><strong>GSTIN:</strong> {printBill.BranchGSTIN || '—'} <strong>State Code:</strong> {printBill.BranchStateCode || '—'}</p>
         <h3>{printBill.CustomerName}</h3><p>{printBill.CustomerMobile} · {printBill.CustomerAddress}</p>
-        <table><thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>
-          {printBill.Treatments?.filter((row) => row.IsPrinted).map((row, index) => <tr key={`pt-${index}`}><td>{row.TreatmentName}</td><td>1</td><td>{formatINR(row.Price)}</td><td>{formatINR(row.Price)}</td></tr>)}
+        <table><thead><tr><th>Description</th><th>HSN</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>
+          {printBill.Treatments?.filter((row) => row.IsPrinted).map((row, index) => <tr key={`pt-${index}`}><td>{row.TreatmentName}</td><td>{row.HSNCode || '—'}</td><td>1</td><td>{formatINR(row.Price)}</td><td>{formatINR(row.Price)}</td></tr>)}
           {printBill.Items?.map((row, index) => <tr key={`pi-${index}`}><td>{row.ItemName}</td><td>{row.Quantity} {row.Unit}</td><td>{formatINR(row.Rate)}</td><td>{formatINR(row.LineTotal)}</td></tr>)}
         </tbody></table><p><strong>Payment mode:</strong> {printBill.PaymentMode}</p><h2>Total: {formatINR(printBill.NetAmount)}</h2>
         <section className="bill-print-terms"><h3>Terms &amp; Conditions</h3><ol>{printBill.Terms?.map((term, index) => <li key={term.TermId || term.TermText || index}>{typeof term === 'string' ? term : term.TermText}</li>)}</ol></section>

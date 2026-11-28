@@ -1207,12 +1207,13 @@ tbody tr:last-child td {
 .sale-lines-table th:first-child,
 .sale-lines-table td:first-child { width: 7%; }
 
-.treatment-lines-table th:nth-child(2), .treatment-lines-table td:nth-child(2) { width: 24%; }
-.treatment-lines-table th:nth-child(3), .treatment-lines-table td:nth-child(3) { width: 15%; }
-.treatment-lines-table th:nth-child(4), .treatment-lines-table td:nth-child(4) { width: 10%; }
-.treatment-lines-table th:nth-child(5), .treatment-lines-table td:nth-child(5) { width: 15%; }
-.treatment-lines-table th:nth-child(6), .treatment-lines-table td:nth-child(6) { width: 19%; }
-.treatment-lines-table th:nth-child(7), .treatment-lines-table td:nth-child(7) { width: 8%; }
+.treatment-lines-table th:nth-child(2), .treatment-lines-table td:nth-child(2) { width: 21%; }
+.treatment-lines-table th:nth-child(3), .treatment-lines-table td:nth-child(3) { width: 10%; }
+.treatment-lines-table th:nth-child(4), .treatment-lines-table td:nth-child(4) { width: 14%; }
+.treatment-lines-table th:nth-child(5), .treatment-lines-table td:nth-child(5) { width: 8%; }
+.treatment-lines-table th:nth-child(6), .treatment-lines-table td:nth-child(6) { width: 14%; }
+.treatment-lines-table th:nth-child(7), .treatment-lines-table td:nth-child(7) { width: 17%; }
+.treatment-lines-table th:nth-child(8), .treatment-lines-table td:nth-child(8) { width: 8%; }
 
 .item-lines-table th:nth-child(2), .item-lines-table td:nth-child(2) { width: 20%; }
 .item-lines-table th:nth-child(3), .item-lines-table td:nth-child(3) { width: 16%; }

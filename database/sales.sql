@@ -1,4 +1,4 @@
-USE [HairWigHouseDb];
+USE [hairpatchdb];
 GO
 
 IF OBJECT_ID(N'dbo.SaleBillTerms', N'U') IS NULL
@@ -37,6 +37,27 @@ BEGIN
 END;
 GO
 
+IF COL_LENGTH(N'dbo.SaleBills', N'BranchGSTIN') IS NULL
+BEGIN
+    ALTER TABLE dbo.SaleBills ADD BranchGSTIN nvarchar(30) NOT NULL
+        CONSTRAINT DF_SaleBills_BranchGSTIN DEFAULT N'';
+END;
+IF COL_LENGTH(N'dbo.SaleBills', N'BranchStateCode') IS NULL
+BEGIN
+    ALTER TABLE dbo.SaleBills ADD BranchStateCode nvarchar(2) NOT NULL
+        CONSTRAINT DF_SaleBills_BranchStateCode DEFAULT N'';
+END;
+GO
+
+UPDATE bill
+SET BranchGSTIN = branch.GSTNumber,
+    BranchStateCode = branch.StateCode
+FROM dbo.SaleBills AS bill
+INNER JOIN dbo.Branches AS branch ON branch.BranchId = bill.BranchId
+WHERE NULLIF(bill.BranchGSTIN, N'') IS NULL
+   OR NULLIF(bill.BranchStateCode, N'') IS NULL;
+GO
+
 IF COL_LENGTH(N'dbo.SaleBills', N'PreviousBalance') IS NULL
 BEGIN
     ALTER TABLE dbo.SaleBills
@@ -54,6 +75,7 @@ BEGIN
         SrNo int NOT NULL,
         TreatmentId uniqueidentifier NOT NULL,
         TreatmentName nvarchar(180) NOT NULL,
+        HSNCode nvarchar(20) NOT NULL CONSTRAINT DF_SaleBillTreatments_HSNCode DEFAULT N'',
         StaffName nvarchar(120) NOT NULL CONSTRAINT DF_SaleBillTreatments_Staff DEFAULT N'',
         TaxRate decimal(5,2) NOT NULL,
         GSTAmount decimal(18,2) NOT NULL,
@@ -66,6 +88,13 @@ BEGIN
         CONSTRAINT UQ_SaleBillTreatments_BillSrNo UNIQUE (BillId, SrNo),
         CONSTRAINT CK_SaleBillTreatments_Amounts CHECK (TaxRate >= 0 AND GSTAmount >= 0 AND Price >= 0)
     );
+END;
+GO
+
+IF COL_LENGTH(N'dbo.SaleBillTreatments', N'HSNCode') IS NULL
+BEGIN
+    ALTER TABLE dbo.SaleBillTreatments ADD HSNCode nvarchar(20) NOT NULL
+        CONSTRAINT DF_SaleBillTreatments_HSNCode DEFAULT N'';
 END;
 GO
 
